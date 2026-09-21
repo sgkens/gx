@@ -1,18 +1,14 @@
-<p align="center">
-  <img src="assets/gx-banner.svg" alt="gx - personal git QOL" width="880">
-</p>
-
 # gx
 
 **Personal git quality-of-life for PowerShell.** One function, `gx`, that wraps the git you type all day, sets up
-https remotes so a **token never lands in `.git/config`**, and refuses to commit a secret.
+HTTPS remotes so default `Env` storage keeps tokens out of `.git/config`, and blocks configured secret patterns before commit.
 
 - **Git only.** No GitLab/GitHub API calls, ever. Everything is `git` plus URLs built from your remote.
-- **Tokens stay in environment variables.** A host-scoped credential helper reads them at push/pull time.
+- **Tokens stay in environment variables by default.** A host-scoped credential helper reads them at push/pull time; plaintext URL storage requires explicit opt-in.
 - **Safe by default.** Fast-forward-only pulls, `--force-with-lease` (never bare `--force`), a secrets/size guard on
   every commit, protected default branch, `-DryRun` on anything that changes state.
 - **Scriptable.** Every mode sets `$LASTEXITCODE` and can return an object (`-PassThru`) or JSON (`-Json`).
-- **One file.** `gx.ps1`: dot-source it from your profile for the `gx` command, or just run `./gx.ps1 status`. PowerShell 7.3+, git 2.28+ recommended.
+- **Direct script or module.** Run/dot-source `gx.ps1`, or import `gx.psd1` to expose only the public `gx` command. PowerShell 7.3+, git 2.28+ recommended.
 
 ```
  gx  commit  ▸ main
@@ -37,19 +33,20 @@ https remotes so a **token never lands in `.git/config`**, and refuses to commit
 Requirements: **PowerShell 7.3+** (native argument passing was fixed in 7.3; Windows PowerShell 5.1 is not supported) and **git**.
 On Windows, Git for Windows supplies the `sh` that git uses to run the credential helper.
 
-`gx.ps1` works two ways:
+`gx` can be loaded as a module or used directly:
 
 | | Command | What happens |
 |---|---|---|
-| **Dot-source** (recommended) | `. ./gx.ps1` then `gx status` | defines the `gx` command (with tab completion) for your session |
+| **Module** (recommended for sharing) | `Import-Module ./gx.psd1` | exports `gx`; implementation helpers remain private |
+| **Dot-source** (single-file use) | `. ./gx.ps1` then `gx status` | defines the `gx` command and implementation helpers in your session |
 | **Run it** | `./gx.ps1 status`, `pwsh -File gx.ps1 status` | runs one command and exits; the exit code is passed through. Nothing stays defined, so there is no tab completion and no `gx` afterwards. With no arguments it shows the help |
 
 > Running the file **cannot** define the command in your session: PowerShell discards what a script defines when it ends.
 > That is why the file has to be *dot-sourced* (note the leading `. `) to get `gx`.
 
 ```powershell
-# 1. put the file somewhere and dot-source it from your profile
-Add-Content $PROFILE '. "$HOME/gx.ps1"'
+# 1. clone/copy the repository, then import the module from your profile
+Add-Content $PROFILE 'Import-Module "$HOME/gx/gx.psd1"'
 
 # 2. give it a token (any provider you use); persist these however you normally do
 $env:GITLAB_API_KEY = '<personal access token>'      # gitlab.com
@@ -84,7 +81,7 @@ gx init -Message "chore: init" -Push -Readme -License MIT
 
 # the everyday loop
 gx                                   # where am I? branch, ahead/behind, changes, remote auth
-gx commit add cache layer -Type feat -Scope api -AddAll
+gx commit add cache layer -Type feat -Scope api -Add src/cache.ps1,tests/cache.Tests.ps1
 gx push -Mr -Open                    # push, ask GitLab for a merge request, open the link it prints
 gx sync                              # fetch --prune, fast-forward if safe, say where you stand
 
@@ -103,8 +100,8 @@ gx sweep ~/src -Fix                  # move any token out of .git/config
 
 ## Command reference
 
-`gx help` shows the overview (with the logo, coloured), `gx <mode> -Help` or `gx help <mode>` one mode. This section is
-generated from the same table (`$script:GxDocs`), so it matches the tool.
+`gx help` shows the overview (with the logo, coloured), `gx <mode> -Help` or `gx help <mode>` one mode. This section mirrors
+the in-tool help table (`$script:GxDocs`); tests ensure every command mode has in-tool documentation.
 
 Every mode also accepts the common options:
 
@@ -156,6 +153,7 @@ gx commit "message with # ; | & $" [options]
 |---|---|
 | `-Type feat -Scope cli` | builds "feat(cli): message" (type must be in the known list; feat! marks a breaking change) |
 | `-Body "text"` | second paragraph of the message |
+| `-Add path[,path...]` | git add -- &lt;paths&gt; first (only the selected files or pathspecs) |
 | `-AddAll` | git add -A first (includes untracked files) |
 | `-Tracked` | commit tracked changes only, like git commit -a |
 | `-Amend` | amend HEAD (no message = keep it); refuses -Push if HEAD is already on the upstream |
@@ -165,8 +163,8 @@ gx commit "message with # ; | & $" [options]
 | `-NoGuard` | skip the secrets and size guard for this commit |
 
 ```powershell
-gx commit fix the parser bug -AddAll
-gx commit add cache -Type feat -Scope api -Body "TTL is 5m" -AddAll -Push
+gx commit fix the parser bug -Add src/parser.ps1
+gx commit add cache -Type feat -Scope api -Body "TTL is 5m" -Add src/cache.ps1,tests/cache.Tests.ps1 -Push
 gx commit -Amend -Message "better wording"
 ```
 
@@ -430,7 +428,7 @@ gx setup [-Name repo] [-Namespace ns] [-Push] [options]
 | `-Remote name` | configure a remote other than origin (e.g. upstream) |
 | `-TokenVar VAR` | env var holding the token (remembered from the existing helper) |
 | `-TokenStorage` | Env (default: clean url + helper) \| Url (plaintext, opt-in) \| Manager (your credential manager) |
-| `-PushUrl url` | separate push url |
+| `-PushUrl url` | separate push url; HTTP credentials require explicit `-TokenStorage Url` |
 | `-Push` | push -u afterwards |
 | `-Force` | allow repointing a remote to a different host or repo |
 
@@ -692,7 +690,7 @@ token *lengths*, never values.
 
 ## Safety features
 
-**Secrets and size guard (`gx commit`).** Looks at exactly what is about to be committed and refuses when it finds:
+**Secrets and size guard (`gx commit`).** Looks at what is about to be committed and refuses configured risky names, sizes, and content patterns:
 
 | Kind | Examples |
 |---|---|
@@ -808,7 +806,7 @@ Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser    # once
 Invoke-Pester ./tests -Output Detailed
 ```
 
-242 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
+250 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
 repositories standing in for GitLab/GitHub through `url.<path>.insteadOf`, and fake tokens. **No network, and your real git
 config and `~/.gx.json` are never read or written.** Coverage: URL parsing, masking, error translation, config loading,
 the credential helper (a real `git credential fill`, with the variable set and unset), `setup` (idempotence, migration,
@@ -816,6 +814,8 @@ storage modes, injection validation, second remotes, identity), `init` scaffolds
 `status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`undo`, `tag` (bump, push, delete),
 `open` URL building per provider, `sweep` including `-Fix`, `log`/`diff`, `clone`/`mirror`, `check`/`doctor`, the help system
 (every mode documented, colour on and off), the scripting surface, running the file directly (argument forwarding, exit codes), command tracing (masking, log file, reset), and parameter completion.
+
+Current command coverage is approximately 85%. GitLab CI runs the suite with an 85% regression floor and separately rejects PSScriptAnalyzer errors.
 
 ## Design decisions
 
@@ -829,8 +829,7 @@ storage modes, injection validation, second remotes, identity), `init` scaffolds
   `mirror -Push -All` (all branches and tags, deletes nothing) is the safe default.
 - **PowerShell 7.3+ only.** Native argument handling was fixed in 7.3; supporting 5.1 needed quoting shims that were the main
   source of bugs.
-- **The help table is data** (`$script:GxDocs`): `gx help`, `gx <mode> -Help`, `Get-Help gx` and this README's reference come
-  from the same source, and a test fails if a mode is added without documentation.
+- **The help table is data** (`$script:GxDocs`): `gx help`, `gx <mode> -Help`, and `Get-Help gx` share one source, and a test fails if a mode is added without documentation.
 
 ## Known limitations
 
@@ -845,17 +844,15 @@ Stated plainly, so you know what has and has not been exercised:
 - `gx sweep` runs repos one after another; on hundreds of repos it takes a while (`status` makes about 15 git calls and `doctor`
   about 20 - measured, not yet optimised).
 - `log` and `diff` stream git's output, so they cannot be returned as objects or `-Json`.
-- No `LICENSE` file is included in this bundle; `gx init -License MIT` can generate an MIT one for the repository you publish it in.
+- CI currently exercises Linux. Windows and macOS behavior still needs runners before claiming full cross-platform verification.
 
 ## Repository layout
 
 ```
 gx.ps1               the tool (dot-source it)
+gx.psm1 / gx.psd1    optional module wrapper and manifest
 gx.example.json      a complete config example (also embedded in gx.ps1 for `gx config -Create`)
 tests/gx.Tests.ps1   Pester 5 suite
-assets/              logo + banner (SVG, with PNG previews)
-assets/make-logo.py  regenerates the logo from the sprite in gx.ps1
+tools/Invoke-CI.ps1  Pester and coverage entry point
+LICENSE              MIT license
 ```
-
-The logo is drawn from the same 5x7 pixel bitmap the terminal banner uses (`$script:GxGlyph`); `python assets/make-logo.py`
-regenerates the SVG/PNGs from `gx.ps1`, so they cannot drift apart. Palette: the 256-colour codes gx prints with.

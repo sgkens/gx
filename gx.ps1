@@ -39,7 +39,7 @@
     gx setup -Push              # set origin for this folder, then push -u origin <branch>
     gx init -Message "chore: init" -Push   # git init + first commit + origin + push (creates the repo on GitLab)
     gx clone helm-core          # clone sgkens/helm-core with the env token and set it up
-    gx commit "add parser" -Type feat -Scope cli -AddAll -Push
+    gx commit "add parser" -Type feat -Scope cli -Add src/parser.ps1 -Push
     gx mirror https://github.com/sgkens/helm-core.git -Push -All   # all branches + tags, never deletes
     gx setup -Name helm-core -Namespace sgkens
     gx log -Detail Full -All
@@ -207,7 +207,14 @@ function _GxTrace {
         try {
             $line = '{0}  gx {1}  [{2}]{3}  {4}   ({5})' -f $rec.Time, $rec.Action.ToLower(), $Kind, $(if ($null -ne $rec.ExitCode) { " exit=$($rec.ExitCode) $($Ms)ms" } else { '' }), $cmd, $dir
             [System.IO.File]::AppendAllText($lf, $line + [Environment]::NewLine)
-        } catch { }
+        } catch {
+            $message = _GxMask $_.Exception.Message
+            $script:GxData['traceLogError'] = $message
+            if (-not $script:GxQuiet -and -not $script:GxTraceLogWarned) {
+                $script:GxTraceLogWarned = $true
+                _GxRow 'warn' 'trace log' "could not append to $lf : $message"
+            }
+        }
     }
     if ($script:GxQuiet) { return }
     $p = $script:GxConfig.Palette
@@ -271,6 +278,7 @@ function _GxGitLive {
     $code = $LASTEXITCODE
     $sw.Stop()
     if ($script:GxTrace) { _GxTrace $ArgList 'live' $code $sw.ElapsedMilliseconds }
+    if ($code -ne 0) { $script:GxOk = $false }
 }
 
 function _GxFirst {
@@ -455,6 +463,13 @@ function _GxSetup {
     $bad = _GxCheckParts $server $tokenVar $user $ns $name
     if ($bad) { _GxRow 'fail' $bad[0] $bad[1]; return }
 
+    # Validate explicit push credentials before changing the remote or helper. Env/Manager
+    # storage promises credential-free HTTP URLs; Url is the deliberate opt-in exception.
+    if ($o.PushUrl -and $o.TokenStorage -ne 'Url' -and $o.PushUrl -match '(?i)^https?://[^/@\s]+@') {
+        _GxRow 'fail' 'push url' 'contains HTTP credentials; use a clean URL or explicitly select -TokenStorage Url'
+        return
+    }
+
     $newClean = "https://$server/$ns/$name.git"
     _GxRow 'ok' 'resolved' "$ns/$name @ $server"
 
@@ -502,7 +517,6 @@ function _GxSetup {
         $g = _GxGit @('config', '--local', '--add', "remote.$remote.pushurl", $o.PushUrl) -Mutating
         if (-not $g.Ok) { _GxRow 'fail' 'push url' $g.Text; return }
         _GxRow 'ok' 'push url' $o.PushUrl
-        if ((_GxParseUrl $o.PushUrl).HasToken -and $o.TokenStorage -ne 'Url') { _GxRow 'warn' 'push url' 'contains a token but storage is not Url' }
     } elseif ($cur.Ok -and $o.TokenStorage -ne 'Url' -and (@($cur.Lines | Where-Object { (_GxParseUrl $_).HasToken }).Count -gt 0)) {
         [void](_GxGit @('config', '--local', '--unset-all', "remote.$remote.pushurl") -Mutating)
         foreach ($x in $cur.Lines) {
@@ -837,10 +851,10 @@ function _GxOpenUrl {
     if ($Url -notmatch '^https?://') { return $false }
     if ($script:GxTrace) { _GxTrace -Kind 'open' -Text "launch browser: $Url" }
     try {
-        if ($IsWindows)    { Start-Process $Url | Out-Null }
-        elseif ($IsMacOS)  { & open $Url | Out-Null }
-        else               { & xdg-open $Url 2>$null | Out-Null }
-        return $true
+        if ($IsWindows) { Start-Process $Url | Out-Null; return $true }
+        if ($IsMacOS)   { & open $Url | Out-Null; return ($LASTEXITCODE -eq 0) }
+        & xdg-open $Url 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
     } catch { return $false }
 }
 
@@ -974,14 +988,19 @@ function _GxCommit {
     if ($pushed) { _GxRow 'warn' 'amend' 'rewriting a commit that is already on the upstream' }
 
     # ---- stage ----------------------------------------------------------------
-    $tracked = $o.Tracked -and -not $o.AddAll
+    $addPaths = if ($o.ContainsKey('Add')) { @($o['Add'] | Where-Object { $_ -and $_.Trim() }) } else { @() }
+    $tracked = $o.Tracked -and -not ($o.AddAll -or $addPaths.Count)
     $spec = if ($tracked -and (_GxRefExists 'HEAD')) { @('HEAD') } else { @('--cached') }
     if ($o.AddAll) {
         $a = _GxGit @('add', '-A') -Mutating
         if (-not $a.Ok) { _GxRow 'fail' 'add' $a.Text; return }
         if (-not $script:GxDry) { _GxRow 'ok' 'staged' 'git add -A' }
+    } elseif ($addPaths.Count) {
+        $a = _GxGit (@('add', '--') + $addPaths) -Mutating
+        if (-not $a.Ok) { _GxRow 'fail' 'add' $a.Text; return }
+        if (-not $script:GxDry) { _GxRow 'ok' 'staged' ("git add -- " + ($addPaths -join ' ')) }
     }
-    $dryStage = $script:GxDry -and $o.AddAll
+    $dryStage = $script:GxDry -and ($o.AddAll -or $addPaths.Count)
     if (-not ($o.Amend -or $dryStage)) {
         $q = _GxGit (@('diff', '--quiet') + $spec)
         if ($q.Code -eq 0) {
@@ -996,7 +1015,7 @@ function _GxCommit {
                     _GxOut ('        ' + (_GxC $c $l))
                 }
                 if ($items.Count -gt 12) { _GxLine ("... and $($items.Count - 12) more") }
-                _GxLine 'stage with git add <files>, or re-run with -AddAll (all) / -Tracked (tracked files only)'
+                _GxLine 'stage with -Add <paths>, or re-run with -AddAll (all) / -Tracked (tracked files only)'
             } else { _GxLine 'working tree is clean' }
             return
         }
@@ -1728,6 +1747,7 @@ Register-ArgumentCompleter -CommandName gx -ParameterName Delete -ScriptBlock {
 Register-ArgumentCompleter -CommandName gx -ParameterName Gitignore -ScriptBlock { param($c, $p, $w) _GxCompleteTemplates $w }
 Register-ArgumentCompleter -CommandName gx -ParameterName Remote -ScriptBlock { param($c, $p, $w) _GxCompleteRemotes $w }
 Register-ArgumentCompleter -CommandName gx -ParameterName File   -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
+Register-ArgumentCompleter -CommandName gx -ParameterName Add    -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
 Register-ArgumentCompleter -CommandName gx -ParameterName Target -ScriptBlock {
     param($c, $p, $w, $ast, $fake)
     $mode = $fake['Mode']
@@ -2152,11 +2172,15 @@ function _GxTag {
     # ---- delete -------------------------------------------------------------
     if ($o.Delete) {
         if (-not (_GxRefExists "refs/tags/$($o.Delete)")) { _GxRow 'fail' 'tag' "no such tag: $($o.Delete)"; return }
+        if ($o.Push -and -not $o.Force) {
+            _GxRow 'fail' 'delete' 'deleting a tag on the remote rewrites what others may have pulled: add -Force'
+            return
+        }
+        if ($o.Push -and -not (_GxRemoteUrl $remote)) { _GxRow 'fail' 'remote' "no '$remote' remote"; return }
         $d = _GxGit @('tag', '-d', $o.Delete) -Mutating
         if (-not $d.Ok) { _GxRow 'fail' 'tag' $d.Text; return }
         _GxRow 'ok' 'deleted' "$($o.Delete)  (local)"
         if ($o.Push) {
-            if (-not $o.Force) { _GxRow 'fail' 'delete' 'deleting a tag on the remote rewrites what others may have pulled: add -Force'; return }
             [void](_GxDoPush @($remote, ":refs/tags/$($o.Delete)") (_GxRemoteCtx $remote))
         } else { _GxLine "remote copy untouched (add -Push -Force to delete it there too)" }
         return
@@ -2529,7 +2553,7 @@ function _GxConfigMode {
 }
 
 # =====================================================================
-#  LOGO (same 5x7 pixel grid as assets/gx-logo.svg) + HELP
+#  TERMINAL LOGO + HELP
 # =====================================================================
 $script:GxGlyph = @{
     g = @('.####', '#...#', '#...#', '#...#', '.####', '....#', '.###.')
@@ -2583,6 +2607,7 @@ $script:GxDocs = @{
         Options  = @(
             @('-Type feat -Scope cli', 'builds "feat(cli): message" (type must be in the known list; feat! marks a breaking change)'),
             @('-Body "text"', 'second paragraph of the message'),
+            @('-Add path[,path...]', 'git add -- <paths> first (only the selected files or pathspecs)'),
             @('-AddAll', 'git add -A first (includes untracked files)'),
             @('-Tracked', 'commit tracked changes only, like git commit -a'),
             @('-Amend', 'amend HEAD (no message = keep it); refuses -Push if HEAD is already on the upstream'),
@@ -2590,7 +2615,7 @@ $script:GxDocs = @{
             @('-Force', 'with -Amend -Push: push with --force-with-lease'),
             @('-NoVerify / -Signoff', '--no-verify / -s'),
             @('-NoGuard', 'skip the secrets and size guard for this commit'))
-        Examples = @('gx commit fix the parser bug -AddAll', 'gx commit add cache -Type feat -Scope api -Body "TTL is 5m" -AddAll -Push', 'gx commit -Amend -Message "better wording"')
+        Examples = @('gx commit fix the parser bug -Add src/parser.ps1', 'gx commit add cache -Type feat -Scope api -Body "TTL is 5m" -Add src/cache.ps1,tests/cache.Tests.ps1 -Push', 'gx commit -Amend -Message "better wording"')
         Notes    = @('The guard blocks .env files, keys, credentials files, files over 5 MB and token patterns, plus the literal value of your own token variables. It never prints what it matched.',
                      'Quote a message that contains # ; | & > < $ or a word that starts with - : PowerShell would otherwise cut it off.') }
     push = @{ Group = 'everyday'; Order = 3
@@ -2814,8 +2839,8 @@ function gx {
         gx - personal git QOL: https remotes with env-var tokens, commit/push/pull/sync, branches, tags, sweep, diagnose.
 
     .DESCRIPTION
-        Git-only (no API calls). Tokens never touch .git/config: a host-scoped credential helper reads them from an
-        environment variable at push/pull time. Every mode prints a colourised status list, sets $LASTEXITCODE, and
+        Git-only (no API calls). Default Env storage keeps tokens out of .git/config: a host-scoped credential helper
+        reads them from an environment variable at push/pull time. Every mode prints a colourised status list, sets $LASTEXITCODE, and
         can return a result object (-PassThru) or JSON (-Json).
 
         gx help            coloured overview (with the logo)
@@ -2920,6 +2945,7 @@ function gx {
         [string]$Body,
         [string]$Type,
         [string]$Scope,
+        [string[]]$Add,
         [switch]$AddAll,
         [switch]$Tracked,
         [switch]$Amend,
@@ -2977,6 +3003,7 @@ function gx {
     $script:GxSecrets  = @()
     $script:GxTrace     = [bool]$CommandTrace
     $script:GxTraceLog  = $null
+    $script:GxTraceLogWarned = $false
     if ($CommandTrace) { $script:GxTraceLog = [System.Collections.Generic.List[object]]::new() }   # not `= if (...) { List }`: the pipeline would unroll an empty list to $null
     $script:GxTraceMode = $(if ($Mode) { $Mode } else { 'Status' })
     $names = @($script:GxConfig.Providers.Values | ForEach-Object { $_.TokenVar }) + @($TokenVar)
@@ -3032,7 +3059,7 @@ function gx {
                 }
                 'Commit' {
                     _GxCommit @{ Message = (_GxFirst $Message ($words -join ' ')); Body = $Body; CommitType = $Type; Scope = $Scope
-                                 AddAll = [bool]$AddAll; Tracked = [bool]$Tracked; Amend = [bool]$Amend; Push = [bool]$Push; Force = [bool]$Force
+                                 Add = @($Add); AddAll = [bool]$AddAll; Tracked = [bool]$Tracked; Amend = [bool]$Amend; Push = [bool]$Push; Force = [bool]$Force
                                  NoVerify = [bool]$NoVerify; Signoff = [bool]$Signoff; NoGuard = [bool]$NoGuard }
                 }
                 'Push'   { _GxPush $syncOpts }

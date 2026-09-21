@@ -1,0 +1,6 @@
+TestResults/
+coverage*.xml
+TestResults.xml
+testResults.xml
+*.clixml
+*.log

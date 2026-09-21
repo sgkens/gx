@@ -1,0 +1,37 @@
+{
+  "user": "sgkens",
+  "namespace": "sgkens",
+  "branch": "main",
+  "logCount": 25,
+
+  "identity": { "name": "Your Name", "email": "you@example.com" },
+  "identities": {
+    "github.com": { "name": "Your Name", "email": "you@users.noreply.github.com" }
+  },
+
+  "hosts": { "git.example.org": "gitlab" },
+  "providers": {
+    "gitlab": { "tokenVar": "GITLAB_API_KEY" },
+    "gitea":  { "server": "codeberg.org", "tokenVar": "CODEBERG_TOKEN" }
+  },
+
+  "commitTypesAdd": ["hotfix"],
+
+  "guard": {
+    "enabled": true,
+    "maxFileMB": 5,
+    "allowPaths": ["tests/fixtures/*"],
+    "extraContentPatterns": [ { "name": "internal API key", "re": "corp_[A-Za-z0-9]{32}" } ]
+  },
+
+  "roots": ["~/src"],
+
+  "traceLog": "~/.gx-trace.log",
+
+  "gitignore": {
+    "default": ["secrets", "os", "editor"],
+    "templates": { "terraform": [".terraform/", "*.tfstate", "*.tfstate.*"] }
+  },
+
+  "palette": { "label": 39, "ok": 114, "warn": 214, "err": 203, "dim": 244 }
+}

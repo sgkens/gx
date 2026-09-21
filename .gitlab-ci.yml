@@ -1,0 +1,26 @@
+image: mcr.microsoft.com/powershell:7.4-ubuntu-22.04
+
+stages:
+  - test
+
+before_script:
+  - apt-get update -qq
+  - apt-get install -y -qq git
+  - pwsh -NoLogo -NoProfile -Command "Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force; Install-Module PSScriptAnalyzer -Scope CurrentUser -Force"
+
+pester:
+  stage: test
+  script:
+    - pwsh -NoLogo -NoProfile -File ./tools/Invoke-CI.ps1
+  artifacts:
+    when: always
+    reports:
+      junit: TestResults.xml
+    paths:
+      - TestResults.xml
+      - coverage.xml
+
+analyzer:
+  stage: test
+  script:
+    - pwsh -NoLogo -NoProfile -Command '$findings = @(Invoke-ScriptAnalyzer . -Recurse -Severity Error); if ($findings.Count) { $findings | Format-Table -Wrap; exit 1 }'
