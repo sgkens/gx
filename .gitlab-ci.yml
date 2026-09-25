@@ -28,7 +28,7 @@ analyzer:
 # ------------------------------------------------------
 coverage:
   stage: coverage
-  needs: [test]
+  needs: [pesters]
   script:
     - echo "🟣 Collecting test coverage..."
     - npm ci
