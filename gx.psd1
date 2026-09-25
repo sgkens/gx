@@ -1,6 +1,6 @@
 @{
     RootModule           = 'gx.psm1'
-    ModuleVersion        = '1.0.0'
+    ModuleVersion        = '0.1.0'
     GUID                 = 'e16ea194-bbad-4cce-a17c-b843150b19c5'
     Author               = 'sgkens'
     Copyright            = '(c) 2026 sgkens. MIT License.'
