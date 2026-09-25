@@ -27,6 +27,7 @@
       Tag / Open   list/create/bump tags; open MR, issues, CI, files in the browser
       Sweep / Ignore / Config   many repos at once (+ token migration); .gitignore templates; ~/.gx.json
       Check / Doctor   ls-remote auth check; environment + credential diagnosis
+      Semver   next SemVer from Conventional Commits in Git history
 
     Token storage (-TokenStorage):
       Env      clean URL in .git/config + host-scoped credential helper that reads
@@ -46,6 +47,9 @@
     gx diff src\app.ps1
     gx diff -Main               # what this branch changes vs the default branch
 #>
+
+using namespace System.Text.RegularExpressions
+using namespace System.Collections.Generic
 
 # =====================================================================
 #  CONFIG - edit this block to customise
@@ -105,6 +109,577 @@ Remove-Variable __gxAlias -ErrorAction SilentlyContinue
 # ================================e=====================================
 #  OUTPUT HELPERS (ANSI 256-colour, NO_COLOR aware)
 # =====================================================================
+
+function Get-SemVer {
+    <#
+    .SYNOPSIS
+    Calculates the next SemVer version from Git history using Conventional Commits.
+
+    .DESCRIPTION
+    Finds the nearest reachable stable SemVer tag and scans only commits made
+    after that tag.
+
+    The highest Conventional Commit change determines the next version:
+
+        BREAKING CHANGE / !  -> MAJOR
+        feat                  -> MINOR
+        fix / perf            -> PATCH
+        everything else       -> no bump
+
+    The selected bump is applied ONCE, regardless of how many commits of that
+    type exist.
+
+    Examples:
+
+        Existing tag: 1.2.3
+
+        fix: a
+        fix: b
+            -> 1.2.4
+
+        feat: a
+        feat: b
+        fix: c
+            -> 1.3.0
+
+        feat: a
+        fix: b
+        refactor!: c
+            -> 2.0.0
+
+    Only exact stable SemVer tags are considered release tags:
+
+        1.2.3
+        v1.2.3
+
+    Tags such as these are ignored:
+
+        1.2
+        1.2.3-beta
+        v1.2.3-rc.1
+        release-1.2.3
+        01.2.3
+
+    If no release tag exists, the baseline is 0.0.0.
+
+    Therefore:
+
+        first feat:            -> 0.1.0
+        first fix:             -> 0.0.1
+        first breaking change: -> 1.0.0
+        docs/chore only:       -> 0.0.0
+
+    In an existing repository, historical versions are NOT recalculated.
+    The nearest existing SemVer tag is treated as authoritative and only
+    commits after that tag affect the calculated version.
+
+    Shallow repositories are permitted when a valid release tag is reachable.
+    If no release tag can be found in a shallow checkout, the function stops
+    rather than silently calculating a potentially incorrect version.
+
+    .PARAMETER MinorTypes
+    Conventional Commit types that trigger a MINOR release.
+
+    Defaults to:
+
+        feat
+
+    .PARAMETER PatchTypes
+    Conventional Commit types that trigger a PATCH release.
+
+    Defaults to:
+
+        fix
+        perf
+
+    Note that Conventional Commits itself explicitly maps fix to PATCH and
+    feat to MINOR. `perf` is included here as a project policy and can be
+    removed:
+
+        -PatchTypes @('fix')
+
+    .EXAMPLE
+    Get-ConventionalCommitVersion
+
+    .EXAMPLE
+    (Get-ConventionalCommitVersion).Version
+
+    .EXAMPLE
+    Get-ConventionalCommitVersion |
+        Select-Object Version, LastTag, CommitsScanned, BumpType
+
+    .EXAMPLE
+    Get-ConventionalCommitVersion -PatchTypes @('fix')
+
+    .OUTPUTS
+    PSCustomObject
+
+    Properties:
+
+        Version
+        LastTag
+        CommitsScanned
+        BumpType
+
+    .NOTES
+    Expected Conventional Commit examples:
+
+        feat(parser): add new parser
+
+        fix: correct null handling
+
+        feat!: replace public API
+
+        feat(api): replace public API
+
+        BREAKING CHANGE: old API has been removed
+
+    Other commit types such as:
+
+        build
+        chore
+        ci
+        docs
+        refactor
+        style
+        test
+
+    do not trigger a release unless they contain a breaking-change marker.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param (
+        [Parameter()]
+        [ValidateNotNull()]
+        [string[]]$MinorTypes = @(
+            'feat'
+        ),
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [string[]]$PatchTypes = @(
+            'fix',
+            'perf'
+        )
+    )
+
+    process {
+        try {
+            # ---------------------------------------------------------------------
+            # Git availability
+            # ---------------------------------------------------------------------
+
+            $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+
+            if (-not $gitCommand) {
+                throw 'Git is not installed or is not available on PATH.'
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Validate repository
+            # ---------------------------------------------------------------------
+
+            & git rev-parse --is-inside-work-tree 2>$null | Out-Null
+
+            if ($LASTEXITCODE -ne 0) {
+                throw 'The current directory is not inside a Git repository.'
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Normalise bump-type configuration
+            # ---------------------------------------------------------------------
+
+            $minorTypeSet = [HashSet[string]]::new(
+                [StringComparer]::OrdinalIgnoreCase
+            )
+
+            $patchTypeSet = [HashSet[string]]::new(
+                [StringComparer]::OrdinalIgnoreCase
+            )
+
+            foreach ($item in $MinorTypes) {
+                if ([string]::IsNullOrWhiteSpace($item)) {
+                    throw 'MinorTypes cannot contain an empty value.'
+                }
+
+                [void]$minorTypeSet.Add($item.Trim())
+            }
+
+            foreach ($item in $PatchTypes) {
+                if ([string]::IsNullOrWhiteSpace($item)) {
+                    throw 'PatchTypes cannot contain an empty value.'
+                }
+
+                $type = $item.Trim()
+
+                if ($minorTypeSet.Contains($type)) {
+                    throw "Commit type '$type' cannot exist in both MinorTypes and PatchTypes."
+                }
+
+                [void]$patchTypeSet.Add($type)
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Handle a repository with no commits
+            # ---------------------------------------------------------------------
+
+            & git rev-parse --verify HEAD 2>$null | Out-Null
+
+            if ($LASTEXITCODE -ne 0) {
+                return [PSCustomObject]@{
+                    Version        = '0.0.0'
+                    LastTag        = $null
+                    CommitsScanned = 0
+                    BumpType       = 'none'
+                }
+            }
+
+
+            # ---------------------------------------------------------------------
+            # SemVer tag definition
+            #
+            # Accepted:
+            #
+            #   1.2.3
+            #   v1.2.3
+            #
+            # Intentionally excludes prerelease/build metadata.
+            # ---------------------------------------------------------------------
+
+            $semVerTagPattern =
+                '^(?:v)?' +
+                '(?<major>0|[1-9]\d*)\.' +
+                '(?<minor>0|[1-9]\d*)\.' +
+                '(?<patch>0|[1-9]\d*)$'
+
+
+            # ---------------------------------------------------------------------
+            # Find nearest reachable VALID SemVer tag.
+            #
+            # git describe is preferable to simply sorting tag names because we
+            # want the release tag nearest to HEAD in Git history.
+            #
+            # Git's --match uses glob patterns rather than regular expressions,
+            # so candidates are validated afterward against the strict SemVer
+            # regular expression.
+            #
+            # If a candidate looks vaguely version-like but is invalid, exclude
+            # it and ask Git for the next nearest candidate.
+            # ---------------------------------------------------------------------
+
+            $describeArgs = @(
+                'describe',
+                '--tags',
+                '--abbrev=0',
+                '--match', '[0-9]*.[0-9]*.[0-9]*',
+                '--match', 'v[0-9]*.[0-9]*.[0-9]*'
+            )
+
+            $lastTag = $null
+            $tagMatch = $null
+
+            while ($true) {
+                $candidate = & git @describeArgs 2>$null
+
+                if ($LASTEXITCODE -ne 0 -or -not $candidate) {
+                    break
+                }
+
+                # git describe should return one value, but explicitly collapse
+                # native output to a scalar for predictable behaviour.
+                $candidate = ([string]$candidate).Trim()
+
+                $candidateMatch = [Regex]::Match(
+                    $candidate,
+                    $semVerTagPattern,
+                    [RegexOptions]::CultureInvariant
+                )
+
+                if ($candidateMatch.Success) {
+                    $lastTag = $candidate
+                    $tagMatch = $candidateMatch
+
+                    break
+                }
+
+                # Candidate matched Git's glob but is not a valid stable SemVer
+                # tag. Ignore it and continue looking backward.
+                $describeArgs += @(
+                    '--exclude',
+                    $candidate
+                )
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Determine starting version
+            # ---------------------------------------------------------------------
+
+            if ($lastTag) {
+                [uint64]$major = $tagMatch.Groups['major'].Value
+                [uint64]$minor = $tagMatch.Groups['minor'].Value
+                [uint64]$patch = $tagMatch.Groups['patch'].Value
+
+                $range = "$lastTag..HEAD"
+            }
+            else {
+                [uint64]$major = 0
+                [uint64]$minor = 0
+                [uint64]$patch = 0
+
+                $range = $null
+
+
+                # -------------------------------------------------------------
+                # Protect CI from incomplete shallow history.
+                #
+                # "No tag" in a shallow checkout does NOT prove that the repo
+                # has never had a release.
+                # -------------------------------------------------------------
+
+                $isShallow = & git rev-parse --is-shallow-repository 2>$null
+
+                if (
+                    $LASTEXITCODE -eq 0 -and
+                    ([string]$isShallow).Trim() -eq 'true'
+                ) {
+                    throw 'afaf'
+                }
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Retrieve commit hashes.
+            #
+            # Do NOT parse `git log -z` directly through PowerShell. Native
+            # command output is represented as PowerShell strings/records and
+            # relying on NUL-delimited native output is unnecessarily fragile.
+            #
+            # Instead, obtain one commit SHA per line and retrieve each complete
+            # commit message separately.
+            # ---------------------------------------------------------------------
+
+            $logArgs = @(
+                'log',
+                '--no-color',
+                '--format=%H'
+            )
+
+            if ($range) {
+                $logArgs += $range
+            }
+
+            $commitHashes = @(
+                & git @logArgs
+            )
+
+            if ($LASTEXITCODE -ne 0) {
+                throw "git log failed with exit code $LASTEXITCODE."
+            }
+
+            $commitHashes = @(
+                $commitHashes |
+                    Where-Object {
+                        -not [string]::IsNullOrWhiteSpace($_)
+                    }
+            )
+
+
+            # ---------------------------------------------------------------------
+            # Conventional Commit patterns
+            #
+            # Subject:
+            #
+            #   type: description
+            #   type(scope): description
+            #   type!: description
+            #   type(scope)!: description
+            #
+            # Require ": " rather than allowing malformed "feat:thing".
+            # ---------------------------------------------------------------------
+
+            $subjectPattern =
+                '^(?<type>[A-Za-z][A-Za-z0-9-]*)' +
+                '(?:\((?<scope>[^()\r\n]+)\))?' +
+                '(?<breaking>!)?: (?<description>\S.*)$'
+
+            # Conventional Commits recognises both:
+            #
+            #   BREAKING CHANGE:
+            #   BREAKING-CHANGE:
+            #
+            # Case-insensitive matching is intentionally tolerant here. Missing
+            # a real breaking release is more dangerous than accepting a
+            # differently-cased marker.
+            $breakingPattern =
+                '(?m)^BREAKING(?: |-)?CHANGE:\s+\S'
+
+
+            # ---------------------------------------------------------------------
+            # Determine highest required bump.
+            #
+            # IMPORTANT:
+            #
+            # We do NOT increment versions inside this loop.
+            #
+            # Multiple fixes still mean one PATCH release.
+            # Multiple features still mean one MINOR release.
+            # Any breaking change overrides every lower bump.
+            # ---------------------------------------------------------------------
+
+            [int]$bumpRank = 0
+
+            # 0 = none
+            # 1 = patch
+            # 2 = minor
+            # 3 = major
+
+            foreach ($hash in $commitHashes) {
+                $messageLines = @(
+                    & git show `
+                        '--no-patch' `
+                        '--no-color' `
+                        '--format=%B' `
+                        $hash
+                )
+
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Unable to read commit '$hash'."
+                }
+
+                $message = $messageLines -join "`n"
+
+                if ([string]::IsNullOrWhiteSpace($message)) {
+                    continue
+                }
+
+                $lines = $message -split '\r?\n', 2
+
+                $subject = $lines[0]
+
+                $body = if ($lines.Count -gt 1) {
+                    $lines[1]
+                }
+                else {
+                    ''
+                }
+
+                $subjectMatch = [Regex]::Match(
+                    $subject,
+                    $subjectPattern,
+                    [RegexOptions]::CultureInvariant
+                )
+
+                $bangBreaking =
+                    $subjectMatch.Success -and
+                    $subjectMatch.Groups['breaking'].Success
+
+                $footerBreaking = [Regex]::IsMatch(
+                    $body,
+                    $breakingPattern,
+                    [RegexOptions]::IgnoreCase -bor
+                    [RegexOptions]::CultureInvariant
+                )
+
+
+                # -------------------------------------------------------------
+                # MAJOR
+                # -------------------------------------------------------------
+
+                if ($bangBreaking -or $footerBreaking) {
+                    $bumpRank = 3
+
+                    # Nothing outranks a breaking change.
+                    break
+                }
+
+
+                # A malformed/non-Conventional subject does not participate in
+                # normal feat/fix classification.
+                if (-not $subjectMatch.Success) {
+                    continue
+                }
+
+                $type = $subjectMatch.Groups['type'].Value
+
+
+                # -------------------------------------------------------------
+                # MINOR
+                # -------------------------------------------------------------
+
+                if ($minorTypeSet.Contains($type)) {
+                    if ($bumpRank -lt 2) {
+                        $bumpRank = 2
+                    }
+
+                    continue
+                }
+
+
+                # -------------------------------------------------------------
+                # PATCH
+                # -------------------------------------------------------------
+
+                if ($patchTypeSet.Contains($type)) {
+                    if ($bumpRank -lt 1) {
+                        $bumpRank = 1
+                    }
+                }
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Apply the selected bump EXACTLY ONCE.
+            # ---------------------------------------------------------------------
+
+            $bumpApplied = switch ($bumpRank) {
+                3 {
+                    $major++
+                    $minor = 0
+                    $patch = 0
+
+                    'major'
+                }
+
+                2 {
+                    $minor++
+                    $patch = 0
+
+                    'minor'
+                }
+
+                1 {
+                    $patch++
+
+                    'patch'
+                }
+
+                default {
+                    'none'
+                }
+            }
+
+
+            # ---------------------------------------------------------------------
+            # Output
+            # ---------------------------------------------------------------------
+
+            return [PSCustomObject]@{
+                Version        = "$major.$minor.$patch"
+                LastTag        = $lastTag
+                CommitsScanned = $commitHashes.Count
+                BumpType       = $bumpApplied
+            }
+        }
+        catch {
+            $PSCmdlet.ThrowTerminatingError($_)
+        }
+    }
+
+}
 
 <#
  _____                   _
@@ -2445,7 +3020,13 @@ function _GxDiff {
     }
 }
 
-$script:GxVersion = '1.0.0'
+$script:GxVersion = try {
+    $manifestPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'gx.psd1' } else {
+        $dir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
+        if ($dir) { Join-Path $dir 'gx.psd1' } else { 'gx.psd1' }
+    }
+    if ($manifestPath -and (Test-Path $manifestPath)) { (Import-PowerShellDataFile -Path $manifestPath).ModuleVersion.ToString() } else { '0.3.0' }
+} catch { '0.3.0' }
 
 # =====================================================================
 #  USER CONFIG FILE  (~/.gx.json or $env:GX_CONFIG) - overlays the defaults above
@@ -3346,6 +3927,16 @@ $script:GxDocs = @{
         Options  = @(@('-Depth n', 'how deep to look (default 2)'), @('-Detail Full', 'list every remote per repo'), @('-Fix', 'migrate remotes that hold a token to the env helper'), @('-TokenVar VAR', 'for hosts gx cannot infer'), @('-Force', 'migrate even when the embedded token differs from the env var'))
         Examples = @('gx sweep ~/src', 'gx sweep ~/src -Fix -DryRun', 'gx sweep -Depth 3')
         Notes    = @('-Fix never touches a repo whose env var is unset (it would stop working). Roots default to "roots" in the config.') }
+    semver = @{ Group = 'diagnose'; Order = 4
+        Summary  = 'next SemVer calculated from Conventional Commits in Git history'
+        Usage    = @('gx semver', 'gx semver [-MinorTypes feat] [-PatchTypes fix,perf]')
+        Options  = @(
+            @('-MinorTypes types', 'commit types that bump MINOR (default: feat)'),
+            @('-PatchTypes types',  'commit types that bump PATCH (default: fix, perf)'))
+        Examples = @('gx semver', 'gx semver -PassThru', 'gx semver -MinorTypes feat,docs -PatchTypes fix', 'gx semver -Json | ConvertFrom-Json')
+        Notes    = @('Scans from the nearest reachable stable SemVer tag (vX.Y.Z or X.Y.Z) to HEAD.',
+                     'One bump is applied per release regardless of how many commits of that type exist.',
+                     'Result is stored in -PassThru Data.semver for scripting.') }
 }
 
 $script:GxGroups = @(
@@ -3353,6 +3944,38 @@ $script:GxGroups = @(
     @('repo', 'repo setup'),
     @('diagnose', 'diagnose')
 )
+
+# =====================================================================
+#  SEMVER wrapper (bridges Get-SemVer into the gx dispatch surface)
+# =====================================================================
+function _GxSemver {
+    param([hashtable]$o)
+    _GxHeader 'semver' (_GxCurrentBranch)
+    if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
+
+    try {
+        $splat = @{}
+        if ($o.MinorTypes -and $o.MinorTypes.Count) { $splat['MinorTypes'] = $o.MinorTypes }
+        if ($o.PatchTypes  -and $o.PatchTypes.Count) { $splat['PatchTypes']  = $o.PatchTypes  }
+
+        $result = Get-SemVer @splat
+
+        $lastTag = if ($result.LastTag) { $result.LastTag } else { '(none)' }
+        _GxRow 'ok'   'version'  $result.Version
+        _GxRow 'info' 'last tag' $lastTag
+        _GxRow 'info' 'bump'     $result.BumpType
+        _GxRow 'info' 'commits'  "$($result.CommitsScanned) scanned since $lastTag"
+
+        $script:GxData['semver'] = @{
+            Version        = $result.Version
+            LastTag        = $result.LastTag
+            BumpType       = $result.BumpType
+            CommitsScanned = $result.CommitsScanned
+        }
+    } catch {
+        _GxRow 'fail' 'semver' $_.Exception.Message
+    }
+}
 
 function _GxHelp {
     $p = $script:GxConfig.Palette
@@ -3437,7 +4060,7 @@ function gx {
 
     .PARAMETER Mode
         status setup init clone mirror commit push pull sync branch switch undo tag log diff open
-        ignore config check doctor sweep help. Defaults to status. Case-insensitive; tab-completes.
+        ignore config check doctor sweep semver help. Defaults to status. Case-insensitive; tab-completes.
 
     .PARAMETER Target
         The words after the mode: the commit message, paths for log/diff, a repo for clone, a branch for switch,
@@ -3472,7 +4095,7 @@ function gx {
         [Parameter(Position = 0)]
         [ValidateSet('Status', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
                      'Branch', 'Switch', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
-                     'Check', 'Doctor', 'Sweep', 'Help')]
+                     'Check', 'Doctor', 'Sweep', 'Semver', 'Help')]
         [string]$Mode,
 
         # Remaining words: Commit = the message (no quotes needed) | Log/Diff = paths | Clone = repo | Mirror = url
@@ -3577,7 +4200,11 @@ function gx {
 
         # mirror
         [string]$MirrorUrl,
-        [switch]$MirrorRefs
+        [switch]$MirrorRefs,
+
+        # semver
+        [string[]]$MinorTypes,
+        [string[]]$PatchTypes
     )
 
     $script:GxDry      = [bool]$DryRun
@@ -3679,6 +4306,7 @@ function gx {
                     _GxDiff @{ Paths = $paths; Base = $Base; To = $To; Main = [bool]$Main; Staged = [bool]$Staged; Word = [bool]$Word
                                Stat = [bool]$Stat; NameOnly = [bool]$NameOnly; NoPager = [bool]$NoPager }
                 }
+                'Semver' { _GxSemver @{ MinorTypes = $MinorTypes; PatchTypes = $PatchTypes } }
             }
         }
         _GxTraceSummary
