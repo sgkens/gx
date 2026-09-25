@@ -105,6 +105,576 @@ Remove-Variable __gxAlias -ErrorAction SilentlyContinue
 # ================================e=====================================
 #  OUTPUT HELPERS (ANSI 256-colour, NO_COLOR aware)
 # =====================================================================
+
+<#
+ _____                   _
+|_   _|___ _ _ _ __ __ _| |
+  | | / -_) '_| '_ Y _` | |
+  |_| \___|_| | .__|__,_|_|.ps1
+              |_|
+___________________________________________________.
+Scope: ascii color Interpolation and SGR Generation
+Repo Path: phellams-utils/helpers/color/terpal.ps1
+----------.
+DESCRPTION
+----------.
+Returns A Curred Generated Hastable function with predefined ascii color set to applys Propties, and
+functions to appy or parse ascii pallete and RGB True Color
+- Returned HashTable has two objects
+- parseColor < function - Parses RGB Array @()|string array into SGR string
+- paletteObj < [pscustomobject]
+    - Functions:
+    - Apply(): applies the color to the text takes, string and Ascii SGR
+    - GetFillColor(): < 2 modes Conditional and Gradient
+    - GetStaticColor(): Returns Static color SGR
+#>
+# NOTE: Extact this into phellams utils color
+# EXAMPLES:
+# - $terpal = Get-TerminalPalette -ColorPalette @{fill=@(255,10,100)} -ColorMode solid
+# - $terpal.apply.invoke('this value', $terpal.GetFillColor.invoke(10,255))
+# ------------------------------------------------------------------------------
+function Get-TerminalPalette {
+    [cmdletbinding()]
+    [alias('terpal')]
+    param (
+        [hashtable]$ColorPalette,
+        [string]$ColorMode,
+        [hashtable]$ColorThresholds,
+        [int[]]$GradientStart,
+        [int[]]$GradientEnd,
+        [int]$CurrentValue,
+        [int]$MaxValue = 100
+    )
+
+    $esc = [char]27
+    $reset = "$esc[0m"
+
+    $parseColor = {
+        param($Value)
+        if ($null -eq $Value) { return $null }
+        if ($Value -is [array] -and $Value.Count -ge 3) {
+            return "38;2;$([int]$Value[0]);$([int]$Value[1]);$([int]$Value[2])"
+        }
+        if ($Value -is [int] -or "$Value" -match '^\d+$') {
+            return "38;5;$Value"
+        }
+        return [string]$Value
+    }
+
+    $paletteObj = [PSCustomObject]@{
+        Apply  = {
+            param([string]$Text, [string]$Code)
+            $useColor = if ($env:NO_COLOR) { $false } elseif ($null -ne $script:GxColorOn) { $script:GxColorOn } else { -not [Console]::IsOutputRedirected }
+            if (-not $useColor -or [string]::IsNullOrWhiteSpace($Code) -or [string]::IsNullOrEmpty($Text)) { return $Text }
+            $sgr = if ($Code -match '^\d+$') { "38;5;$Code" } else { $Code }
+            return "$esc[$sgr`m$Text$reset"
+        }.GetNewClosure()
+
+        GetFillColor = {
+            param([int]$Index, [int]$TotalFill)
+
+            if ($ColorMode -eq 'Conditional') {
+                $matchingThreshold = $null
+                $minKey = [int]::MaxValue
+                foreach ($k in $ColorThresholds.Keys) {
+                    if ($k -ge $CurrentValue -and $k -lt $minKey) {
+                        $minKey = $k
+                        $matchingThreshold = $k
+                    }
+                }
+                if ($null -ne $matchingThreshold) {
+                    return (& $parseColor $ColorThresholds[$matchingThreshold])
+                }
+                return $null
+            }
+
+            if ($ColorMode -eq 'Gradient') {
+                $ratio = 0
+                if ($TotalFill -gt 1) { $ratio = $Index / ($TotalFill - 1) }
+                $r = [math]::Round($GradientStart[0] + ($GradientEnd[0] - $GradientStart[0]) * $ratio)
+                $g = [math]::Round($GradientStart[1] + ($GradientEnd[1] - $GradientStart[1]) * $ratio)
+                $b = [math]::Round($GradientStart[2] + ($GradientEnd[2] - $GradientStart[2]) * $ratio)
+                return "38;2;$r;$g;$b"
+            }
+
+            # Default Solid
+            foreach ($k in $ColorPalette.Keys) {
+                if ($k -ieq 'Fill') {
+                    return (& $parseColor $ColorPalette[$k])
+                }
+            }
+            return $null
+        }.GetNewClosure()
+
+        GetStaticColor = {
+            param([string]$Key)
+            foreach ($k in $ColorPalette.Keys) {
+                if ($k -ieq $Key) {
+                    return (& $parseColor $ColorPalette[$k])
+                }
+            }
+            return $null
+        }.GetNewClosure()
+    }
+
+    return $paletteObj
+}
+
+function New-kvstring {
+    <#
+        Helper Function: kvstring|kvstr
+        type: Advanced function
+        ------------------
+        Description: Converts a string with key-value pairs to a key-value string
+
+        * Supports key-value pairs with or without a level prefix
+        * Supports nested key-value pairs
+        * Supports multiple key-value pairs per string
+
+        Example Usage:
+        $message = "This is a {kv:key=value} and {kv:key2=value2}"
+        New-kvstring -String $message
+    #>
+    [CmdletBinding()]
+    [Alias('kvstr', 'kvstring', 'ctstrig')]
+    param(
+        [parameter(Mandatory, Position = 0, ValueFromPipeline)]
+        [string]$String
+    )
+    process {
+        # safety check
+        if ($null -eq (Get-Command "New-Kvinc" -ErrorAction SilentlyContinue)) {
+            Write-Host "ckvstring: Missing dependency: kvinc"
+            return
+        }
+
+        $pattern = '\{((?<Level>prop|property|meta|metadata|confval|inf|err|wrn|api|git|value|type|key):)?kv:(?<Key>[^=]+)=(?<Value>.*?)\}'
+        $finalString = $String
+
+        # Get all matches first
+        $allMatches = [regex]::Matches($finalString, $pattern)
+
+        # Process matches from right to left to avoid index shifting issues
+        for ($i = $allMatches.Count - 1; $i -ge 0; $i--) {
+            $match = $allMatches[$i]
+            $Level = $match.Groups['Level'].Value.Trim()
+            $key = $match.Groups['Key'].Value
+            $value = $match.Groups['Value'].Value.Trim()
+
+            if([string]::IsNullOrEmpty($Level)) {
+                $replacement = New-Kvinc -KeyName $key -KeyValue $value
+            }else{
+                $replacement = New-Kvinc -KeyName $key -KeyValue $value -Type $Level
+            }
+
+            $finalString = $finalString.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
+        }
+
+        return $finalString
+    }
+}
+
+<#
+.SYNOPSIS
+    Creates a string with a key-value pair in a specific format.
+.DESCRIPTION
+    Creates a string with a key-value pair in a specific format.
+.PARAMETER keyName
+    The name of the key.
+.PARAMETER KeyValue
+    The value of the key.
+.PARAMETER type
+    The type of the key-value pair.
+.EXAMPLE
+    New-kvstring -message "This is a test message with a {kv:username=JohnDoe}"
+    New-KvString -message "This is a test message with a {kv:username=JohnDoe} and a {prop:kv:userid=12345}"
+    New-KvString -message "This is a test message with a {kv:username=JohnDoe} and a {prop:kv:userid=12345} and a {meta:kv:session=abcde"
+#>
+function New-Kvinc {
+    [CmdletBinding()]
+    [alias('kvinc')]
+    param(
+        [parameter(Mandatory, Position = 0)]
+        [string]$keyName,
+
+        [parameter(Mandatory, Position = 1)]
+        [string]$KeyValue,
+
+        [parameter(Mandatory = $false, Position = 2)]
+        [ValidateSet(
+            'inf',
+            'err',
+            'wrn',
+            'prop',
+            'property',
+            'api',
+            'git',
+            'value',
+            'type',
+            'key',
+            'meta',
+            'metadata',
+            'confval',
+            'none'
+        )]
+        [string]$type
+    )
+
+    if (!$type) {
+        $type = 'none'
+    }
+
+    $useColor = if ($env:NO_COLOR) { $false } elseif ($null -ne $script:GxColorOn) { $script:GxColorOn } else { -not [Console]::IsOutputRedirected }
+    if (-not $useColor) {
+        if ($type -eq 'none') {
+            return "{ $keyName : $KeyValue }"
+        }
+        return "{ $($type.ToUpper()) ≡ $keyName : $KeyValue }"
+    }
+
+    $esc = [char]27
+    $reset = "$esc[0m"
+    $utility = @{
+        kvinc_bracket_color  = "95"
+        kvinc_bracket_format = ";1"
+        kvinc_type_color     = "90"
+        kvinc_type_format    = ";1"
+        kvinc_key_color      = "94"
+        kvinc_key_format     = ";1"
+        kvinc_value_color    = "90"
+        kvinc_value_format   = ";1"
+    }
+
+    $brkStart = "$esc[$($utility.kvinc_bracket_color)$($utility.kvinc_bracket_format)m{$reset"
+    $brkEnd   = "$esc[$($utility.kvinc_bracket_color)$($utility.kvinc_bracket_format)m}$reset"
+    $colKey   = "$esc[$($utility.kvinc_key_color)$($utility.kvinc_key_format)m$keyName$reset"
+    $colColon = "$esc[$($utility.kvinc_bracket_color)$($utility.kvinc_bracket_format)m:$reset"
+    $colVal   = "$esc[$($utility.kvinc_value_color)$($utility.kvinc_value_format)m$KeyValue$reset"
+
+    if ($type -eq 'none') {
+        return "$brkStart $colKey $colColon $colVal $brkEnd"
+    }
+
+    $tagColor = switch ($type) {
+        'inf'  { '37' }
+        'wrn'  { '33' }
+        'err'  { '31' }
+        default { '36' }
+    }
+    $colType = "$esc[$tagColor$($utility.kvinc_type_format)m$($type.ToUpper())$reset ≡"
+
+    return "$brkStart $colType $colKey $colColon $colVal $brkEnd"
+}
+
+# Example usage:
+
+# $message = "This is a test message with a {kv:username=JohnDoe} and a {prop:kv:userid=12345} and a {meta:kv:session=abcde"
+# $result = New-kvstring -message $message
+
+<#
+.SYNOPSIS
+    Clap - ANSI-aware string concatenation and padding utility.
+
+.DESCRIPTION
+    Clap exists for one job: gluing together ANSI/SGR-encoded strings without
+    the visible width getting thrown off by invisible escape sequences. Plain
+    PadLeft/PadRight count escape codes as characters, which breaks table
+    columns, headers, and TUI frames the moment color is involved. Clap
+    strips escape sequences only for measurement, pads/truncates against the
+    *visible* length, and builds the final line in a single StringBuilder
+    pass so redraws are atomic (no partial-width flicker / "tearing").
+
+    Two ways to call it:
+      - Strings mode: positional array of strings + parallel Width/Align/PadChar arrays
+      - Cells mode:   array of hashtables, one per column, for table-row building
+
+.EXPORTS
+    Clap                    Main entry point (alias: New-ClapString)
+    Pad-AnsiString           Single-string ANSI-aware pad/truncate
+    Get-ClapVisibleLength    Visible (non-escape) character count
+    Set-ClapAnsiPattern      Override the escape-sequence regex if needed
+
+.EXAMPLE
+    # Plain padding, two columns, ANSI-colored
+    $name   = "$($psa.Green)Garvey$($psa.Reset)"
+    $status = "$($psa.Red)OFFLINE$($psa.Reset)"
+    Clap -Strings $name,$status -Width 20,10 -Align Left,Right
+
+.EXAMPLE
+    # Table row via Cells mode (clearer when columns vary in spec)
+    Clap -Cells @(
+        @{ Text = "$($psa.Cyan)Name$($psa.Reset)";   Width = 20; Align = 'Left'  },
+        @{ Text = "$($psa.Yellow)Role$($psa.Reset)"; Width = 12; Align = 'Left'  },
+        @{ Text = "$($psa.Green)OK$($psa.Reset)";    Width = 6;  Align = 'Right' }
+    ) -Separator ' | '
+
+.EXAMPLE
+    # Truncate overflowing cell content with an ellipsis, ANSI codes preserved
+    Clap -Cells @(
+        @{ Text = "$($psa.Red)A very long status message here$($psa.Reset)"; Width = 15; Truncate = $true }
+    )
+
+.EXAMPLE
+    # Build a header line, then write it in one shot (atomic / tear-free)
+    $line = Clap -Strings "$($psa.Bg.Blue)$($psa.White) RAVENUI $($psa.Reset)" -Width 80 -Align Center -PadChar '═'
+    Write-Host $line
+#>
+
+# Matches standard CSI SGR sequences: ESC [ ... letter (covers color/style codes)
+$script:ClapAnsiPattern = [regex]'\x1B\[[0-9;]*[a-zA-Z]'
+
+function Set-ClapAnsiPattern {
+    <#
+    .SYNOPSIS
+        Override the regex Clap uses to detect/strip escape sequences.
+        Useful if you're emitting OSC sequences or non-standard codes.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)]
+        [regex]$Pattern
+    )
+    $script:ClapAnsiPattern = $Pattern
+}
+
+function Get-ClapVisibleLength {
+    <#
+    .SYNOPSIS
+        Returns the visible character count of a string, ignoring ANSI escape sequences.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline, Position = 0)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Text
+    )
+    process {
+        if ([string]::IsNullOrEmpty($Text)) { return 0 }
+        ($script:ClapAnsiPattern.Replace($Text, '')).Length
+    }
+}
+
+function Clap-TruncateAnsi {
+    # Internal helper: walk the string char-by-char, copying escape sequences
+    # verbatim (they don't count toward MaxVisible) and stopping once the
+    # visible-character budget is spent.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Text,
+        [Parameter(Mandatory)]
+        [int]$MaxVisible
+    )
+
+    if ($MaxVisible -le 0) { return '' }
+
+    $sb = [System.Text.StringBuilder]::new()
+    $visibleCount = 0
+    $i = 0
+    $len = $Text.Length
+
+    while ($i -lt $len -and $visibleCount -lt $MaxVisible) {
+        if ($Text[$i] -eq [char]0x1B) {
+            $m = $script:ClapAnsiPattern.Match($Text, $i)
+            if ($m.Success -and $m.Index -eq $i) {
+                [void]$sb.Append($m.Value)
+                $i += $m.Length
+                continue
+            }
+        }
+        [void]$sb.Append($Text[$i])
+        $visibleCount++
+        $i++
+    }
+
+    $sb.ToString()
+}
+
+function Pad-AnsiString {
+    <#
+    .SYNOPSIS
+        Pads or truncates a single (possibly ANSI-encoded) string to a target
+        visible width, without the escape sequences throwing off the math.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory, Position = 0)]
+        [AllowEmptyString()]
+        [string]$Text,
+
+        [Parameter(Mandatory, Position = 1)]
+        [int]$Width,
+
+        [ValidateSet('Left', 'Right', 'Center')]
+        [string]$Align = 'Left',
+
+        [char]$PadChar = ' ',
+
+        [switch]$Truncate,
+
+        [string]$TruncateSuffix = '…'
+    )
+
+    $visibleLen = Get-ClapVisibleLength -Text $Text
+
+    if ($visibleLen -gt $Width) {
+        if ($Truncate) {
+            $suffixLen = Get-ClapVisibleLength -Text $TruncateSuffix
+            $budget = $Width - $suffixLen
+            $Text = (Clap-TruncateAnsi -Text $Text -MaxVisible $budget) + $TruncateSuffix
+            $visibleLen = Get-ClapVisibleLength -Text $Text
+        }
+        else {
+            # Overflow with no truncation requested: return as-is, uncut.
+            return $Text
+        }
+    }
+
+    $deficit = $Width - $visibleLen
+    if ($deficit -le 0) { return $Text }
+
+    switch ($Align) {
+        'Left'   { return $Text + ([string]::new($PadChar, $deficit)) }
+        'Right'  { return ([string]::new($PadChar, $deficit)) + $Text }
+        'Center' {
+            $leftLen  = [Math]::Floor($deficit / 2)
+            $rightLen = $deficit - $leftLen
+            return ([string]::new($PadChar, $leftLen)) + $Text + ([string]::new($PadChar, $rightLen))
+        }
+    }
+}
+
+function Clap {
+    <#
+    .SYNOPSIS
+        Concatenate ANSI/formatted strings with correct visible-width padding,
+        in a single pass, for tear-free TUI lines, table rows, and headers.
+
+    .PARAMETER Strings
+        Plain mode: array of text segments to join.
+
+    .PARAMETER Width
+        Parallel array of target widths per segment (Strings mode). If shorter
+        than Strings, the last value repeats. Omit to skip padding entirely.
+
+    .PARAMETER Align
+        Parallel array of 'Left' | 'Right' | 'Center' per segment.
+
+    .PARAMETER PadChar
+        Parallel array of pad characters per segment. Defaults to space.
+
+    .PARAMETER Cells
+        Table mode: array of hashtables, each with optional keys
+        Text / Width / Align / PadChar / Truncate. Width defaults to the
+        segment's own visible length (no padding) if omitted.
+
+    .PARAMETER Separator
+        String inserted between segments/cells. Defaults to empty.
+
+    .PARAMETER Truncate
+        Global default for truncation when a segment overflows its width.
+        Per-cell 'Truncate' key (Cells mode) overrides this.
+
+    .PARAMETER TruncateSuffix
+        Suffix appended when truncating. Defaults to '…'.
+
+    .PARAMETER Raw
+        Bypass ANSI-aware padding entirely; just concatenate as-is. Useful
+        when segments are already pre-padded and you just need fast joining.
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Strings')]
+    [OutputType([string])]
+    [Alias('New-ClapString')]
+    param(
+        [Parameter(ParameterSetName = 'Strings', Mandatory, Position = 0, ValueFromPipeline)]
+        [string[]]$Strings,
+
+        [Parameter(ParameterSetName = 'Strings')]
+        [int[]]$Width,
+
+        [Parameter(ParameterSetName = 'Strings')]
+        [string[]]$Align,
+
+        [Parameter(ParameterSetName = 'Strings')]
+        [char[]]$PadChar,
+
+        [Parameter(ParameterSetName = 'Cells', Mandatory, Position = 0)]
+        [hashtable[]]$Cells,
+
+        [string]$Separator = '',
+
+        [switch]$Truncate,
+
+        [string]$TruncateSuffix = '…',
+
+        [switch]$Raw
+    )
+
+    begin {
+        $collected = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        if ($PSCmdlet.ParameterSetName -eq 'Strings' -and $Strings) {
+            foreach ($s in $Strings) { $collected.Add($s) }
+        }
+    }
+
+    end {
+        $sb = [System.Text.StringBuilder]::new()
+
+        if ($PSCmdlet.ParameterSetName -eq 'Cells') {
+            for ($idx = 0; $idx -lt $Cells.Count; $idx++) {
+                $cell = $Cells[$idx]
+                $text = [string]$cell.Text
+                $w    = if ($cell.ContainsKey('Width'))   { [int]$cell.Width }    else { Get-ClapVisibleLength $text }
+                $al   = if ($cell.ContainsKey('Align'))    { [string]$cell.Align } else { 'Left' }
+                $pc   = if ($cell.ContainsKey('PadChar'))  { [char]$cell.PadChar } else { ' ' }
+                $tr   = if ($cell.ContainsKey('Truncate')) { [bool]$cell.Truncate } else { $Truncate.IsPresent }
+
+                $ts   = if ($cell.ContainsKey('TruncateSuffix')) { [string]$cell.TruncateSuffix } else { $TruncateSuffix }
+
+                $piece = if ($Raw) {
+                    $text
+                }
+                else {
+                    Pad-AnsiString -Text $text -Width $w -Align $al -PadChar $pc -Truncate:$tr -TruncateSuffix $ts
+                }
+
+                [void]$sb.Append($piece)
+                if ($idx -lt $Cells.Count - 1) { [void]$sb.Append($Separator) }
+            }
+        }
+        else {
+            for ($idx = 0; $idx -lt $collected.Count; $idx++) {
+                $text = $collected[$idx]
+
+                if ($Raw -or -not $Width -or $Width.Count -eq 0) {
+                    [void]$sb.Append($text)
+                }
+                else {
+                    $w  = $Width[[Math]::Min($idx, $Width.Count - 1)]
+                    $al = if ($Align   -and $Align.Count   -gt 0) { $Align[[Math]::Min($idx, $Align.Count - 1)] }   else { 'Left' }
+                    $pc = if ($PadChar -and $PadChar.Count -gt 0) { $PadChar[[Math]::Min($idx, $PadChar.Count - 1)] } else { ' ' }
+
+                    [void]$sb.Append((Pad-AnsiString -Text $text -Width $w -Align $al -PadChar $pc -Truncate:$Truncate -TruncateSuffix $TruncateSuffix))
+                }
+
+                if ($idx -lt $collected.Count - 1) { [void]$sb.Append($Separator) }
+            }
+        }
+
+        $sb.ToString()
+    }
+}
+
+# Uncomment if dropping this into a module file instead of dot-sourcing directly:
+# Export-ModuleMember -Function Clap, 'Pad-AnsiString', 'Get-ClapVisibleLength', 'Set-ClapAnsiPattern' -Alias 'New-ClapString'
+
 function _GxUseColor {
     if ($env:NO_COLOR) { return $false }
     return -not [Console]::IsOutputRedirected
@@ -141,7 +711,7 @@ function _GxRow {
         'dry'   { $tag = 'dry ';  $col = $p.mode }
         default { $tag = 'info';  $col = $p.dim }
     }
-    Write-Host (' [' + (_GxC $col $tag) + '] ' + (_GxC $p.label $Label.PadRight(16)) + ' ' + $mv)
+    Write-Host (Clap -Strings (' [' + (_GxC $col $tag) + ']'), (_GxC $p.label $Label), $mv -Width 7, 16, 0 -Separator ' ')
 }
 
 function _GxLine {
@@ -220,9 +790,10 @@ function _GxTrace {
     $p = $script:GxConfig.Palette
     # a non-zero exit is often normal for a read (git config --get exits 1 for an unset key): warn colour there, red only for writes/live
     $col = if ($Kind -eq 'dry') { $p.mode } elseif ($gitKind -and $Code -ne 0) { $(if ($Kind -eq 'read') { $p.warn } else { $p.err }) } elseif ($Kind -eq 'write') { $p.label } else { $p.dim }
-    $meta = if ($Kind -eq 'dry') { 'not run   ' } elseif ($gitKind) { ('exit {0}  {1,5} ms' -f $Code, $Ms) } else { ''.PadRight(15) }
-    Write-Host ('  [' + (_GxC $p.dim 'trace') + '] ' + (_GxC $p.dim ('#' + $rec.Seq.ToString('00'))) + ' ' + (_GxC $col $Kind.PadRight(5)) + ' ' + (_GxC $col $meta) + '  ' + $cmd +
-                $(if ($script:GxDir) { '  ' + (_GxC $p.dim "(in $dir)") } else { '' }))
+    $meta = if ($Kind -eq 'dry') { 'not run' } elseif ($gitKind) { ('exit {0}  {1,5} ms' -f $Code, $Ms) } else { '' }
+    $dirPart = if ($script:GxDir) { ' ' + (_GxC $p.dim "(in $dir)") } else { '' }
+    $line = Clap -Strings ('  [' + (_GxC $p.dim 'trace') + ']'), (_GxC $p.dim ('#' + $rec.Seq.ToString('00'))), (_GxC $col $Kind), (_GxC $col $meta), ($cmd + $dirPart) -Width 9, 3, 5, 16, 0 -Separator ' '
+    Write-Host $line.TrimEnd()
     foreach ($e in $err) { Write-Host ('                 ' + (_GxC $col '! ') + $e) }
 }
 
@@ -2481,7 +3052,13 @@ function _GxSweep {
     $items = @($items)
     $wn = [Math]::Min(34, [Math]::Max(4, ($items | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum))
     $wb = [Math]::Min(22, [Math]::Max(6, ($items | ForEach-Object { $_.Branch.Length } | Measure-Object -Maximum).Maximum))
-    _GxOut ('  ' + (_GxC $p.dim ('repo'.PadRight($wn) + '  ' + 'branch'.PadRight($wb) + '  ' + 'sync'.PadRight(8) + '  ' + 'changes'.PadRight(22) + '  auth')))
+    _GxOut ('  ' + (Clap -Cells @(
+        @{ Text = (_GxC $p.dim 'repo');    Width = $wn },
+        @{ Text = (_GxC $p.dim 'branch');  Width = $wb },
+        @{ Text = (_GxC $p.dim 'sync');    Width = 8 },
+        @{ Text = (_GxC $p.dim 'changes'); Width = 22 },
+        @{ Text = (_GxC $p.dim 'auth') }
+    ) -Separator '  '))
     $tot = @{ dirty = 0; ahead = 0; behind = 0; plain = 0; noup = 0; state = 0 }
     foreach ($it in $items) {
         $sync = if (-not $it.Upstream) { '-' } elseif (-not $it.Ahead -and -not $it.Behind) { '=' } else { (@($(if ($it.Ahead) { "+$($it.Ahead)" }), $(if ($it.Behind) { "-$($it.Behind)" })) | Where-Object { $_ }) -join ' ' }
@@ -2493,9 +3070,14 @@ function _GxSweep {
         $cSync = if ($sync -eq '=') { $p.ok } elseif ($sync -eq '-') { $p.dim } else { $p.warn }
         $cCh   = if ($it.Unmerged) { $p.err } elseif ($dirty) { $p.warn } else { $p.ok }
         $cAuth = switch ($it.Auth) { 'PLAINTEXT' { $p.err } 'env' { $p.ok } 'env (unset)' { $p.warn } default { $p.dim } }
-        $nm = $it.Name; if ($nm.Length -gt $wn) { $nm = $nm.Substring(0, $wn - 1) + '~' }
-        $bn = $it.Branch; if ($bn.Length -gt $wb) { $bn = $bn.Substring(0, $wb - 1) + '~' }
-        _GxOut ('  ' + $nm.PadRight($wn) + '  ' + (_GxC $p.dim $bn.PadRight($wb)) + '  ' + (_GxC $cSync $sync.PadRight(8)) + '  ' + (_GxC $cCh $chT.PadRight(22)) + '  ' + (_GxC $cAuth ($it.Auth + $(if ($it.State) { '   [' + $it.State + ']' } else { '' }))))
+        $stateTag = if ($it.State) { "   [$($it.State)]" } else { '' }
+        _GxOut ('  ' + (Clap -Cells @(
+            @{ Text = $it.Name;                  Width = $wn; Truncate = $true; TruncateSuffix = '~' },
+            @{ Text = (_GxC $p.dim $it.Branch);  Width = $wb; Truncate = $true; TruncateSuffix = '~' },
+            @{ Text = (_GxC $cSync $sync);       Width = 8 },
+            @{ Text = (_GxC $cCh $chT);          Width = 22 },
+            @{ Text = (_GxC $cAuth ($it.Auth + $stateTag)) }
+        ) -Separator '  '))
         if ($o.Detail -eq 'Full') { foreach ($r in $it.Remotes) { _GxLine "$($r.Name): $($r.Url)  [$($r.Auth)]" } }
     }
     $script:GxData['sweep'] = @($items | ForEach-Object { @{ Name = $_.Name; Path = $_.Path; Branch = $_.Branch; Upstream = $_.Upstream; Ahead = $_.Ahead; Behind = $_.Behind
@@ -2539,12 +3121,18 @@ function _GxConfigMode {
     else { _GxRow 'info' 'file' "none at $($script:GxConfigPath)  (gx config -Create writes an example)" }
     if ($st.Unknown.Count) { _GxRow 'warn' 'unknown keys' ($st.Unknown -join ', ') }
     foreach ($n in $st.Notes) { _GxRow 'warn' 'note' $n }
-    _GxRow 'info' 'user' "$($c.User)   namespace: $(_GxFirst $env:GX_NAMESPACE $c.Namespace $c.User)   branch: $($c.Branch)   log count: $($c.LogCount)"
-    foreach ($k in ($c.Providers.Keys | Sort-Object)) { _GxRow 'info' "provider $k" "server: $(if ($c.Providers[$k].Server) { $c.Providers[$k].Server } else { '(pass -Server)' })   token var: $(if ($c.Providers[$k].TokenVar) { '$' + $c.Providers[$k].TokenVar } else { '(pass -TokenVar)' })" }
+    $ns = _GxFirst $env:GX_NAMESPACE $c.Namespace $c.User
+    _GxRow 'info' 'user' (New-kvstring "$($c.User)   {confval:kv:namespace=$ns}   {confval:kv:branch=$($c.Branch)}   {confval:kv:logCount=$($c.LogCount)}")
+    foreach ($k in ($c.Providers.Keys | Sort-Object)) {
+        $srv = if ($c.Providers[$k].Server) { $c.Providers[$k].Server } else { '(pass -Server)' }
+        $tvar = if ($c.Providers[$k].TokenVar) { '$' + $c.Providers[$k].TokenVar } else { '(pass -TokenVar)' }
+        _GxRow 'info' "provider $k" (New-kvstring "{api:kv:server=$srv}   {prop:kv:tokenVar=$tvar}")
+    }
     if ($c.Hosts.Count) { _GxRow 'info' 'hosts' ((@($c.Hosts.Keys) | Sort-Object | ForEach-Object { "$_ -> $($c.Hosts[$_])" }) -join ', ') }
     if ($c.Identity) { _GxRow 'info' 'identity' "$($c.Identity.Name) <$($c.Identity.Email)>" }
     foreach ($k in ($c.Identities.Keys | Sort-Object)) { _GxRow 'info' "identity $k" "$($c.Identities[$k].Name) <$($c.Identities[$k].Email)>" }
-    _GxRow 'info' 'guard' "$(if ($c.Guard.Enabled) { 'on' } else { 'OFF' }), max file $($c.Guard.MaxFileMB) MB, $($c.Guard.NamePatterns.Count) name + $($c.Guard.ContentPatterns.Count) content patterns, $(@($c.Guard.AllowPaths).Count) allowed path(s)"
+    $gd = if ($c.Guard.Enabled) { 'on' } else { 'OFF' }
+    _GxRow 'info' 'guard' (New-kvstring "$gd   {confval:kv:maxFile=$($c.Guard.MaxFileMB)MB}   {prop:kv:patterns=$($c.Guard.NamePatterns.Count) name, $($c.Guard.ContentPatterns.Count) content}   {prop:kv:allowed=$(@($c.Guard.AllowPaths).Count)}")
     if ($c.Roots.Count) { _GxRow 'info' 'roots' ($c.Roots -join ', ') }
     _GxRow 'info' 'trace log' $(if (_GxTraceLogPath) { "$(_GxTraceLogPath)  (used by -CommandTrace)" } else { 'none  (set "traceLog" or $env:GX_TRACE_LOG to keep a file of every -CommandTrace run)' })
     _GxRow 'info' 'commit types' ($c.CommitTypes -join ', ')
@@ -2786,11 +3374,11 @@ function _GxHelp {
         Write-Host ''
         Write-Host (' ' + (& $lab $g[1]))
         $modes = @($script:GxDocs.Keys | Where-Object { $script:GxDocs[$_].Group -eq $g[0] } | Sort-Object { $script:GxDocs[$_].Order })
-        foreach ($m in $modes) { Write-Host ('   ' + (_GxC $p.mode $m.PadRight(8)) + ' ' + $script:GxDocs[$m].Summary) }
+        foreach ($m in $modes) { Write-Host (Clap -Strings '  ', (_GxC $p.mode $m), $script:GxDocs[$m].Summary -Width 0, 8, 0 -Separator ' ') }
     }
     Write-Host ''
     Write-Host (' ' + (& $lab 'everywhere'))
-    foreach ($o in $script:GxCommon) { Write-Host ('   ' + (_GxC $p.mode $o[0].PadRight(10)) + ' ' + $o[1]) }
+    foreach ($o in $script:GxCommon) { Write-Host (Clap -Strings '  ', (_GxC $p.mode $o[0]), $o[1] -Width 0, 10, 0 -Separator ' ') }
     Write-Host ''
     Write-Host (' ' + (& $lab 'env') + '   GITLAB_API_KEY  GITHUB_API_KEY  GITEA_API_KEY  GX_USER  GX_NAMESPACE  GX_CONFIG  GX_TRACE_LOG  NO_COLOR')
     Write-Host (' ' + (& $lab 'exit') + '  0 = ok, 1 = anything failed or was refused (also in $LASTEXITCODE)')
@@ -2815,7 +3403,7 @@ function _GxModeHelp {
         Write-Host ''
         Write-Host (' ' + (_GxC $p.label 'options'))
         $w = [Math]::Min(34, ($d.Options | ForEach-Object { $_[0].Length } | Measure-Object -Maximum).Maximum)
-        foreach ($o in $d.Options) { Write-Host ('   ' + (_GxC $p.mode $o[0].PadRight($w)) + '  ' + $o[1]) }
+        foreach ($o in $d.Options) { Write-Host ('   ' + (Pad-AnsiString (_GxC $p.mode $o[0]) $w) + '  ' + $o[1]) }
     }
     Write-Host ''
     Write-Host (' ' + (_GxC $p.label 'examples'))
