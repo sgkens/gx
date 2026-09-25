@@ -2,15 +2,12 @@ image: sgkens/phellams-automator:${AUTOMATOR_VERSION}
 
 stages:
   - test
-
-before_script:
-  - apt-get update -qq
-  - apt-get install -y -qq gi
-  - pwsh -NoLogo -NoProfile -Command "Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force; Install-Module PSScriptAnalyzer -Scope CurrentUser -Force"
+  - coverage
 
 pester:
   stage: test
   script:
+    - echo "🟣 Running Pester Test Suite..."
     - pwsh -NoLogo -NoProfile -File ./tools/Invoke-CI.ps1
   artifacts:
     when: always
@@ -23,4 +20,19 @@ pester:
 analyzer:
   stage: test
   script:
+    - echo "🟣 Running Scipt Analyzer..."
     - pwsh -NoLogo -NoProfile -Command '$findings = @(Invoke-ScriptAnalyzer . -Recurse -Severity Error); if ($findings.Count) { $findings | Format-Table -Wrap; exit 1 }'
+
+# ------------------------------------------------------
+# Coverage stage
+# ------------------------------------------------------
+coverage:
+  stage: coverage
+  needs: [test]
+  script:
+    - echo "🟣 Collecting test coverage..."
+    - npm ci
+    - npm run test:coverage
+    - command -v codecov
+    - codecov --verbose upload-process --disable-search --fail-on-error -t "$CODECOV_TOKEN" -n "gx-${CI_COMMIT_SHORT_SHA}" -F unit -f coverage/lcov.info
+  allow_failure: false
