@@ -1,11 +1,11 @@
-image: mcr.microsoft.com/powershell:7.4-ubuntu-22.04
+image: sgkens/phellams-automator:${AUTOMATOR_VERSION}
 
 stages:
   - test
 
 before_script:
   - apt-get update -qq
-  - apt-get install -y -qq git
+  - apt-get install -y -qq gi
   - pwsh -NoLogo -NoProfile -Command "Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force; Install-Module PSScriptAnalyzer -Scope CurrentUser -Force"
 
 pester:
