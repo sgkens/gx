@@ -141,7 +141,7 @@ On Windows, Git for Windows supplies the `sh` that git uses to run the credentia
 | ------------------------------------ | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Module** (recommended for sharing) | `Import-Module ./gx.psd1`                     | exports `gx`; implementation helpers remain private                                                                                                                           |
 | **Dot-source** (single-file use)     | `. ./gx.ps1` then `gx status`                 | defines the `gx` command and implementation helpers in your session                                                                                                           |
-| **Run it**                           | `./gx.ps1 status`, `pwsh -File gx.ps1 status` | runs one command and exits; the exit code is passed through. Nothing stays defined, so there is no tab completion and no `gx` afterwards. With no arguments it shows the help |
+| **Run it**                           | `./gx status` (Unix), `./gx.ps1 status`, `pwsh -File gx.ps1 status` | runs one command and exits; the exit code is passed through. Nothing stays defined and no `gx` command remains afterwards. With no arguments it shows the help |
 
 > Running the file **cannot** define the command in your session: PowerShell discards what a script defines when it ends.
 > That is why the file has to be _dot-sourced_ (note the leading `. `) to get `gx`.
@@ -903,7 +903,7 @@ Built-in `.gitignore` templates: `secrets os editor powershell node python dotne
 
 ## Tab completion
 
-Registered when the file is **dot-sourced** (running `./gx.ps1 ...` defines nothing in your session, so there is nothing to complete).
+`./gx.ps1` exposes its parameter metadata directly, so parameter names and `ValidateSet` values complete even in a clean session. Importing the module or dot-sourcing `gx.ps1` also registers the repository/config-aware completers for all three invocation forms: `gx`, `./gx.ps1`, and the extensionless `./gx` launcher. PowerShell treats `./gx` as a native command, so its completion registration requires the module or dot-sourced script to be loaded first.
 
 - **Parameter names** complete natively: `gx commit fix -Ty<Tab>` -> `-Type`, `gx -Comm<Tab>` -> `-CommandTrace`. There are ~95 parameters, so
   press `Ctrl+Space` (PSReadLine's menu; that is its default binding on Windows) to browse them, or run `Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete` to make Tab open the menu on any platform.
@@ -937,7 +937,7 @@ Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser    # once
 Invoke-Pester ./tests -Output Detailed
 ```
 
-250 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
+326 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
 repositories standing in for GitLab/GitHub through `url.<path>.insteadOf`, and fake tokens. **No network, and your real git
 config and `~/.gx.json` are never read or written.** Coverage: URL parsing, masking, error translation, config loading,
 the credential helper (a real `git credential fill`, with the variable set and unset), `setup` (idempotence, migration,

@@ -2,7 +2,7 @@
 
 All notable changes to `gx` are recorded in this file.
 
-## Unreleased
+## 0.1.0
 
 ### Added
 
