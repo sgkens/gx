@@ -11,6 +11,8 @@
 Describe 'gx' {
     BeforeAll {
         $script:GxFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'gx.ps1'
+        $script:GxLauncher = Join-Path (Split-Path $PSScriptRoot -Parent) 'gx'
+        $script:Pwsh = (Get-Process -Id $PID).Path
 
         $script:Sandbox = (New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('gx-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))).FullName
         $script:Saved = @{
@@ -1377,16 +1379,57 @@ Describe 'gx' {
             $c = TabExpansion2 -inputScript 'gx sw' -cursorColumn 5
             ($c.CompletionMatches | ForEach-Object CompletionText) | Should -Contain 'Switch'
         }
+        It 'completes script parameters and ValidateSet values without loading gx first' {
+            $output = & $script:Pwsh -NoLogo -NoProfile -Command @"
+Set-Location '$((Split-Path $script:GxFile -Parent) -replace "'", "''")'
+function Complete-Line([string]`$Line) { (TabExpansion2 `$Line `$Line.Length).CompletionMatches.CompletionText -join ',' }
+Complete-Line './gx.ps1 -Mo'
+Complete-Line './gx.ps1 sw'
+Complete-Line './gx.ps1 setup -TokenStorage '
+"@
+            $output[0] | Should -Match '(^|,)-Mode(,|$)'
+            $output[1] | Should -Match '(^|,)Switch(,|$)'
+            $output[2] | Should -Match '(^|,)Env(,|$)'
+        }
+        It 'keeps the script and function parameter surfaces in sync' {
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:GxFile, [ref]$tokens, [ref]$errors)
+            $errors | Should -BeNullOrEmpty
+            $functionAst = $ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'gx'
+            }, $true)
+
+            @($ast.ParamBlock.Parameters.Name.VariablePath.UserPath) |
+                Should -Be @($functionAst.Body.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        }
+        It 'reuses gx completion for both direct launchers after gx is loaded' {
+            foreach ($line in './gx.ps1 sw', './gx sw') {
+                $matches = (TabExpansion2 -InputScript $line -CursorColumn $line.Length).CompletionMatches.CompletionText
+                $matches | Should -Contain 'Switch'
+            }
+            foreach ($line in './gx.ps1 setup -Server ', './gx setup -Server ') {
+                $matches = (TabExpansion2 -InputScript $line -CursorColumn $line.Length).CompletionMatches.CompletionText
+                $matches | Should -Contain 'gitlab.com'
+            }
+        }
     }
 
     Describe 'running the file directly' {
         BeforeAll {
-            $script:Pwsh = (Get-Process -Id $PID).Path
             $script:Run = { param([string[]]$A) & $script:Pwsh -NoLogo -NoProfile -File $script:GxFile @A 2>&1 }
         }
         It './gx.ps1 <args> runs one command, in the current repo' {
             New-Linked 'run1' | Out-Null
             $o = (& $script:Run @('status')) -join "`n"
+            $LASTEXITCODE | Should -Be 0
+            $o | Should -Match 'gx\s+status'
+            $o | Should -Match 'working tree clean'
+        }
+        It './gx <args> forwards to gx.ps1 and propagates success' -Skip:$IsWindows {
+            New-Linked 'run-launcher' | Out-Null
+            $o = (& $script:GxLauncher status) -join "`n"
             $LASTEXITCODE | Should -Be 0
             $o | Should -Match 'gx\s+status'
             $o | Should -Match 'working tree clean'
