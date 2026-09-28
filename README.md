@@ -6,7 +6,54 @@
 [![gitlab-issues](https://img.shields.io/gitlab/issues/open/sgkens/gx?style=flat-square&logo=gitlab&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://gitlab.com/sgkens/gx)
 [![codecov-gitlab](https://img.shields.io/codecov/c/gitlab/sgkens/gx?style=flat-square&logo=codecov&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://img.shields.io/codecov/c/gitlab/sgkens/gx?style=flat-square&logo=codecov&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)
 
-## What it does:
+<details>
+<summary><strong>📚Table of Contents</strong></summary>
+
+- [What it does:](#what-it-does)
+- [Contents](#contents)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Command reference](#command-reference)
+    - [everyday](#everyday)
+        - [`gx status`](#gx-status)
+        - [`gx commit`](#gx-commit)
+        - [`gx push`](#gx-push)
+        - [`gx pull`](#gx-pull)
+        - [`gx sync`](#gx-sync)
+        - [`gx branch`](#gx-branch)
+        - [`gx switch`](#gx-switch)
+        - [`gx undo`](#gx-undo)
+        - [`gx tag`](#gx-tag)
+        - [`gx log`](#gx-log)
+        - [`gx diff`](#gx-diff)
+        - [`gx open`](#gx-open)
+    - [repo setup](#repo-setup)
+        - [`gx setup`](#gx-setup)
+        - [`gx init`](#gx-init)
+        - [`gx clone`](#gx-clone)
+        - [`gx mirror`](#gx-mirror)
+        - [`gx ignore`](#gx-ignore)
+        - [`gx config`](#gx-config)
+    - [diagnose](#diagnose)
+        - [`gx check`](#gx-check)
+        - [`gx doctor`](#gx-doctor)
+        - [`gx sweep`](#gx-sweep)
+        - [`gx semver`](#gx-semver)
+- [Command trace](#command-trace)
+- [How tokens are handled](#how-tokens-are-handled)
+- [Safety features](#safety-features)
+- [Scripting](#scripting)
+- [Config file](#config-file)
+- [Environment variables](#environment-variables)
+- [Tab completion](#tab-completion)
+- [Testing](#testing)
+- [Design decisions](#design-decisions)
+- [Known limitations](#known-limitations)
+- [Repository layout](#repository-layout)
+
+</details>
+
+## **What it does:**
 
 > **Personal git quality-of-life for PowerShell.** One function, `gx`, that wraps the git you type all day, sets up
 > HTTPS remotes so default `Env` storage keeps tokens out of `.git/config`, and blocks configured secret patterns before commit.
@@ -33,7 +80,7 @@
 > secret itself.
 
 ```
-❯ gx help
+❯ ./gx help || im gx; gx help || iex https://raw.githubusercontent.com/sgkens/gx/main/gx.ps1 help;
 
   ▄▀▀▀█ ▀▄ ▄▀     gx v1.0.0
   █   █  ▄▀▄  ▄▄  personal git QOL
@@ -83,13 +130,7 @@
  exit  0 = ok, 1 = anything failed or was refused (also in $LASTEXITCODE)
 ```
 
-## Contents
-
-[Install](#install) · [Quick start](#quick-start) · [Command reference](#command-reference) · [How tokens are handled](#how-tokens-are-handled) ·
-[Safety features](#safety-features) · [Scripting](#scripting) · [Config file](#config-file) · [Environment](#environment-variables) ·
-[Tab completion](#tab-completion) · [Testing](#testing) · [Design decisions](#design-decisions) · [Known limitations](#known-limitations) · [Repository layout](#repository-layout)
-
-## Install
+## **Install**
 
 Requirements: **PowerShell 7.3+** (native argument passing was fixed in 7.3; Windows PowerShell 5.1 is not supported) and **git**.
 On Windows, Git for Windows supplies the `sh` that git uses to run the credential helper.
