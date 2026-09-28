@@ -1,7 +1,15 @@
-# gx
+<div align="center">
 
-**Personal git quality-of-life for PowerShell.** One function, `gx`, that wraps the git you type all day, sets up
-HTTPS remotes so default `Env` storage keeps tokens out of `.git/config`, and blocks configured secret patterns before commit.
+![gx Banner](https://r2os.staticcanvas.me/logos/gx/dist/webp/gx-logo-64x64.webp)
+
+</div>
+
+## What it does:
+
+> **Personal git quality-of-life for PowerShell.** One function, `gx`, that wraps the git you type all day, sets up
+> HTTPS remotes so default `Env` storage keeps tokens out of `.git/config`, and blocks configured secret patterns before commit.
+
+> Can be used as a standalone script or module.
 
 - **Git only.** No GitLab/GitHub API calls, ever. Everything is `git` plus URLs built from your remote.
 - **Tokens stay in environment variables by default.** A host-scoped credential helper reads them at push/pull time; plaintext URL storage requires explicit opt-in.
@@ -676,9 +684,9 @@ gx semver
 gx semver [-MinorTypes feat] [-PatchTypes fix,perf]
 ```
 
-| Option             |                                                       |
-| ------------------ | ----------------------------------------------------- |
-| `-MinorTypes types` | commit types that bump MINOR (default: `feat`)       |
+| Option              |                                                       |
+| ------------------- | ----------------------------------------------------- |
+| `-MinorTypes types` | commit types that bump MINOR (default: `feat`)        |
 | `-PatchTypes types` | commit types that bump PATCH (default: `fix`, `perf`) |
 
 ```powershell
