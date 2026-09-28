@@ -28,11 +28,11 @@ analyzer:
 # ------------------------------------------------------
 coverage:
   stage: coverage
-  needs: [pester]
+  needs:
+    - job: pester
+      artifacts: true
   script:
     - echo "🟣 Collecting test coverage..."
-    - npm ci
-    - npm run test:coverage
     - command -v codecov
     - codecov --verbose upload-process --disable-search --fail-on-error -t "$CODECOV_TOKEN" -n "gx-${CI_COMMIT_SHORT_SHA}" -F unit -f coverage/lcov.info
   allow_failure: false
