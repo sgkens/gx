@@ -51,6 +51,112 @@
 using namespace System.Text.RegularExpressions
 using namespace System.Collections.Generic
 
+# Keep this script-level parameter block in sync with the public gx function.
+# PowerShell reads it without executing the file, which gives ./gx.ps1 native
+# parameter-name and ValidateSet completion as well as normal parameter binding.
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet('Status', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
+                 'Branch', 'Switch', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
+                 'Check', 'Doctor', 'Sweep', 'Semver', 'Help')]
+    [string]$Mode,
+
+    [Parameter(Position = 1, ValueFromRemainingArguments)]
+    [string[]]$Target,
+
+    [switch]$Help,
+
+    [ValidateSet('gitlab', 'github', 'gitea', 'custom')]
+    [string]$OriginType = 'gitlab',
+    [string]$Server,
+    [string]$Name,
+    [string]$Namespace,
+    [string]$User,
+    [string]$TokenVar,
+    [ValidateSet('Env', 'Url', 'Manager')]
+    [string]$TokenStorage = 'Env',
+    [string]$PushUrl,
+    [string]$Branch,
+    [switch]$Push,
+    [switch]$DryRun,
+    [switch]$Force,
+
+    [switch]$PassThru,
+    [switch]$Json,
+    [switch]$Quiet,
+    [switch]$CommandTrace,
+
+    [ValidateSet('Compact', 'Full')]
+    [string]$Detail = 'Compact',
+    [switch]$All,
+    [int]$Count = -1,
+    [string]$Author,
+    [switch]$Me,
+    [string]$Since,
+    [string]$Until,
+    [string]$Grep,
+    [switch]$Merges,
+    [switch]$NoMerges,
+    [string]$File,
+    [switch]$Stat,
+
+    [string]$Base,
+    [string]$To,
+    [switch]$Main,
+    [switch]$Staged,
+    [switch]$NameOnly,
+    [switch]$Word,
+    [switch]$NoPager,
+
+    [string]$Message,
+    [string]$Body,
+    [string]$Type,
+    [string]$Scope,
+    [string[]]$Add,
+    [switch]$AddAll,
+    [switch]$Tracked,
+    [switch]$Amend,
+    [switch]$NoVerify,
+    [switch]$Signoff,
+    [switch]$NoGuard,
+
+    [string]$Remote,
+    [switch]$Tags,
+    [switch]$Mr,
+    [switch]$CiSkip,
+    [switch]$Open,
+    [switch]$Rebase,
+    [switch]$Merge,
+    [switch]$Autostash,
+    [ValidateSet('major', 'minor', 'patch')]
+    [string]$Bump,
+    [switch]$Lightweight,
+
+    [switch]$Create,
+    [switch]$Clean,
+    [string]$Delete,
+    [switch]$Print,
+    [switch]$List,
+
+    [switch]$Fix,
+    [int]$Depth = -1,
+
+    [string[]]$Gitignore,
+    [switch]$NoIgnore,
+    [switch]$Readme,
+    [string]$License,
+
+    [string]$Dir,
+    [switch]$NoCd,
+
+    [string]$MirrorUrl,
+    [switch]$MirrorRefs,
+
+    [string[]]$MinorTypes,
+    [string[]]$PatchTypes
+)
+
 # =====================================================================
 #  CONFIG - edit this block to customise
 # =====================================================================
@@ -2871,30 +2977,31 @@ function _GxCompleteDate {
         Where-Object { $_ -like "$Word*" } | ForEach-Object { _GxCR $_ 'git date: relative (2.weeks) or absolute (2026-01-31)' }
 }
 
-Register-ArgumentCompleter -CommandName gx -ParameterName To        -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Branch    -ScriptBlock { param($c, $p, $w) _GxCompleteBranches $w -IncludeRemote }
-Register-ArgumentCompleter -CommandName gx -ParameterName Namespace -ScriptBlock { param($c, $p, $w) _GxCompleteNamespace $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Server    -ScriptBlock { param($c, $p, $w) _GxCompleteServer $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName User      -ScriptBlock { param($c, $p, $w) _GxCompleteUser $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName TokenVar  -ScriptBlock { param($c, $p, $w) _GxCompleteTokenVar $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Scope     -ScriptBlock { param($c, $p, $w) _GxCompleteScope $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Author    -ScriptBlock { param($c, $p, $w) _GxCompleteAuthor $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Since     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Until     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName License   -ScriptBlock { param($c, $p, $w) 'MIT' | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ 'the only built-in license' } }
-Register-ArgumentCompleter -CommandName gx -ParameterName Type   -ScriptBlock { param($c, $p, $w) _GxCompleteType $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Base   -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Delete -ScriptBlock {
+$script:GxCompletionCommands = @('gx', 'gx.ps1')
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName To        -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Branch    -ScriptBlock { param($c, $p, $w) _GxCompleteBranches $w -IncludeRemote }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Namespace -ScriptBlock { param($c, $p, $w) _GxCompleteNamespace $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Server    -ScriptBlock { param($c, $p, $w) _GxCompleteServer $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName User      -ScriptBlock { param($c, $p, $w) _GxCompleteUser $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName TokenVar  -ScriptBlock { param($c, $p, $w) _GxCompleteTokenVar $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Scope     -ScriptBlock { param($c, $p, $w) _GxCompleteScope $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Author    -ScriptBlock { param($c, $p, $w) _GxCompleteAuthor $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Since     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Until     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName License   -ScriptBlock { param($c, $p, $w) 'MIT' | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ 'the only built-in license' } }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Type   -ScriptBlock { param($c, $p, $w) _GxCompleteType $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Base   -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Delete -ScriptBlock {
     param($c, $p, $w, $ast, $fake)
     $mode = $fake['Mode']
     if (-not $mode) { $els = $ast.CommandElements; if ($els.Count -gt 1 -and $els[1] -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $mode = $els[1].Value } }
     if ("$mode" -ieq 'tag') { _GxCompleteTags $w } else { _GxCompleteBranches $w }
 }
-Register-ArgumentCompleter -CommandName gx -ParameterName Gitignore -ScriptBlock { param($c, $p, $w) _GxCompleteTemplates $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Remote -ScriptBlock { param($c, $p, $w) _GxCompleteRemotes $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName File   -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
-Register-ArgumentCompleter -CommandName gx -ParameterName Add    -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
-Register-ArgumentCompleter -CommandName gx -ParameterName Target -ScriptBlock {
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Gitignore -ScriptBlock { param($c, $p, $w) _GxCompleteTemplates $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Remote -ScriptBlock { param($c, $p, $w) _GxCompleteRemotes $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName File   -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Add    -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Target -ScriptBlock {
     param($c, $p, $w, $ast, $fake)
     $mode = $fake['Mode']
     if (-not $mode) {
@@ -2910,6 +3017,25 @@ Register-ArgumentCompleter -CommandName gx -ParameterName Target -ScriptBlock {
         '^(?i:help)$'   { $script:GxDocs.Keys | Sort-Object | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ } }
         '^(?i:open)$'   { 'repo', 'mr', 'new', 'issues', 'ci', 'branch', 'commit', 'tags', 'releases' | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ } }
     }
+}
+
+# An extensionless ./gx launcher is a native command to PowerShell, so it cannot
+# expose a param block. Re-run completion against the loaded gx function and
+# return the same results used by the module and gx.ps1 paths.
+Register-ArgumentCompleter -Native -CommandName gx -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commandText = $commandAst.Extent.Text
+    $commandElement = $commandAst.CommandElements[0].Extent
+    $commandLength = $commandElement.EndOffset - $commandElement.StartOffset
+    $relativeStart = $commandElement.StartOffset - $commandAst.Extent.StartOffset
+    $relativeCursor = $cursorPosition - $commandAst.Extent.StartOffset
+    $trailingSpaceCount = [Math]::Max(0, $relativeCursor - $commandText.Length)
+    if ($trailingSpaceCount) { $commandText += ' ' * $trailingSpaceCount }
+
+    $functionText = $commandText.Remove($relativeStart, $commandLength).Insert($relativeStart, 'gx')
+    $functionCursor = $relativeCursor + 2 - $commandLength
+    [System.Management.Automation.CommandCompletion]::CompleteInput($functionText, $functionCursor, $null).CompletionMatches
 }
 
 # =====================================================================
@@ -4334,12 +4460,12 @@ _GxLoadConfig
 #  InvocationName is '.' only when dot-sourced.
 # ---------------------------------------------------------------------
 if ($MyInvocation.InvocationName -ne '.') {
-    if ($args.Count -eq 0) {
+    if ($PSBoundParameters.Count -eq 0) {
         gx help
         Write-Host ('  ' + (_GxC $script:GxConfig.Palette.dim ('tip: `. ' + $MyInvocation.MyCommand.Path + '` defines the gx command for this session; add that line to $PROFILE to keep it.')))
         Write-Host ''
         exit 0
     }
-    gx @args
+    gx @PSBoundParameters
     exit $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 })
 }
