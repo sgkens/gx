@@ -1,8 +1,10 @@
-<div align="center">
-
 ![gx Banner](https://r2os.staticcanvas.me/logos/gx/dist/webp/gx-logo-64x64.webp)
 
-</div>
+[![gitlab-license](https://img.shields.io/gitlab/license/sgkens/gx?style=flat-square&logo=gitlab&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://gitlab.com/sgkens/gx)
+
+[![gitlab-pipeline](https://img.shields.io/gitlab/pipeline-status/sgkens/gx?style=flat-square&logo=gitlab&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://gitlab.com/sgkens/gx)
+[![gitlab-issues](https://img.shields.io/gitlab/issues/open/sgkens/gx?style=flat-square&logo=gitlab&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://gitlab.com/sgkens/gx)
+[![codecov-gitlab](https://img.shields.io/codecov/c/gitlab/sgkens/gx?style=flat-square&logo=codecov&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://img.shields.io/codecov/c/gitlab/sgkens/gx?style=flat-square&logo=codecov&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)
 
 ## What it does:
 
