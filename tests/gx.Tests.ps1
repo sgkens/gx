@@ -1647,4 +1647,577 @@ Describe 'gx' {
             } finally { $env:MY_SERVICE_TOKEN = $null }
         }
     }
+
+    # =====================================================================================
+    Describe 'Get-SemVer' {
+        BeforeEach {
+            New-TestRepo ('sv-' + [guid]::NewGuid().ToString('N').Substring(0, 6)) | Out-Null
+        }
+
+        It 'returns 0.0.0 with no commits' {
+            $r = Get-SemVer
+            $r.Version       | Should -Be '0.0.0'
+            $r.LastTag       | Should -BeNullOrEmpty
+            $r.CommitsScanned | Should -Be 0
+            $r.BumpType      | Should -Be 'none'
+        }
+
+        It 'bump=none when only chore commits exist' {
+            Set-Content a.txt x; git add -A; git commit -qm 'chore: housekeeping'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '0.0.0'
+            $r.BumpType | Should -Be 'none'
+        }
+
+        It 'fix commit -> patch bump' {
+            Set-Content a.txt x; git add -A; git commit -qm 'fix: correct null handling'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '0.0.1'
+            $r.BumpType | Should -Be 'patch'
+        }
+
+        It 'feat commit -> minor bump' {
+            Set-Content a.txt x; git add -A; git commit -qm 'feat: new feature'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '0.1.0'
+            $r.BumpType | Should -Be 'minor'
+        }
+
+        It 'breaking-change footer -> major bump' {
+            Set-Content a.txt x; git add -A
+            git commit -qm "feat: big" -m "BREAKING CHANGE: removes old API"
+            $r = Get-SemVer
+            $r.Version  | Should -Be '1.0.0'
+            $r.BumpType | Should -Be 'major'
+        }
+
+        It 'feat! (bang) -> major bump' {
+            Set-Content a.txt x; git add -A; git commit -qm 'feat!: replace public API'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '1.0.0'
+            $r.BumpType | Should -Be 'major'
+        }
+
+        It 'perf commit -> patch bump (default PatchTypes includes perf)' {
+            Set-Content a.txt x; git add -A; git commit -qm 'perf: faster sort'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '0.0.1'
+            $r.BumpType | Should -Be 'patch'
+        }
+
+        It 'highest bump wins: fix+feat -> minor' {
+            Set-Content a.txt 1; git add -A; git commit -qm 'fix: patch a'
+            Set-Content a.txt 2; git add -A; git commit -qm 'feat: new b'
+            Set-Content a.txt 3; git add -A; git commit -qm 'fix: patch c'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '0.1.0'
+            $r.BumpType | Should -Be 'minor'
+        }
+
+        It 'anchors calculation to the nearest stable semver tag' {
+            Set-Content a.txt 1; git add -A; git commit -qm 'feat: one'
+            git tag -a v1.2.3 -m 'release'
+            Set-Content a.txt 2; git add -A; git commit -qm 'fix: after tag'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '1.2.4'
+            $r.LastTag  | Should -Be 'v1.2.3'
+            $r.BumpType | Should -Be 'patch'
+        }
+
+        It 'ignores pre-release tags and keeps looking' {
+            Set-Content a.txt 1; git add -A; git commit -qm 'feat: one'
+            git tag -a v1.0.0-rc.1 -m 'pre'
+            Set-Content a.txt 2; git add -A; git commit -qm 'fix: after pre'
+            $r = Get-SemVer
+            # No stable tag found; all commits are scanned
+            $r.LastTag | Should -BeNullOrEmpty
+        }
+
+        It 'respects a tag without a v prefix' {
+            Set-Content a.txt 1; git add -A; git commit -qm 'feat: base'
+            git tag -a 2.0.0 -m 'release'
+            Set-Content a.txt 2; git add -A; git commit -qm 'fix: after'
+            $r = Get-SemVer
+            $r.Version  | Should -Be '2.0.1'
+            $r.LastTag  | Should -Be '2.0.0'
+        }
+
+        It 'custom -PatchTypes and -MinorTypes are respected' {
+            Set-Content a.txt x; git add -A; git commit -qm 'docs: update readme'
+            $r = Get-SemVer -MinorTypes @('docs') -PatchTypes @('fix')
+            $r.BumpType | Should -Be 'minor'
+        }
+
+        It 'throws when MinorTypes contains an empty value' {
+            Set-Content a.txt x; git add -A; git commit -qm 'fix: something'
+            { Get-SemVer -MinorTypes @('feat', '') } | Should -Throw
+        }
+
+        It 'throws when a type is in both MinorTypes and PatchTypes' {
+            Set-Content a.txt x; git add -A; git commit -qm 'fix: something'
+            { Get-SemVer -MinorTypes @('fix') -PatchTypes @('fix') } | Should -Throw
+        }
+    }
+
+    # =====================================================================================
+    Describe 'Get-TerminalPalette' {
+        It 'Apply returns plain text when NO_COLOR is set' {
+            $p = Get-TerminalPalette -ColorPalette @{ Fill = 196 }
+            $result = & $p.Apply 'hello' '196'
+            $result | Should -Be 'hello'  # NO_COLOR=1 is set in BeforeAll
+        }
+
+        It 'GetStaticColor returns a code for a known palette key' {
+            $p = Get-TerminalPalette -ColorPalette @{ Error = 196; Fill = 46 }
+            $c = & $p.GetStaticColor 'Fill'
+            $c | Should -Match '46'
+        }
+
+        It 'GetStaticColor is case-insensitive' {
+            $p = Get-TerminalPalette -ColorPalette @{ Fill = 46 }
+            (& $p.GetStaticColor 'fill') | Should -Match '46'
+            (& $p.GetStaticColor 'FILL') | Should -Match '46'
+        }
+
+        It 'GetStaticColor returns null for an unknown key' {
+            $p = Get-TerminalPalette -ColorPalette @{ Fill = 46 }
+            & $p.GetStaticColor 'NoSuchKey' | Should -BeNullOrEmpty
+        }
+
+        It 'GetFillColor returns a Gradient colour in Gradient mode' {
+            $p = Get-TerminalPalette -ColorMode 'Gradient' -GradientStart @(0,0,0) -GradientEnd @(255,255,255) -ColorPalette @{}
+            $c = & $p.GetFillColor 0 4
+            $c | Should -Match '38;2;'
+        }
+
+        It 'GetFillColor returns a Conditional colour when threshold matches' {
+            $p = Get-TerminalPalette -ColorMode 'Conditional' -CurrentValue 50 `
+                -ColorThresholds @{ 50 = @(255,0,0); 100 = @(0,255,0) } -ColorPalette @{}
+            $c = & $p.GetFillColor 0 1
+            $c | Should -Match '38;2;'
+        }
+
+        It 'GetFillColor Solid returns the Fill palette colour' {
+            $p = Get-TerminalPalette -ColorPalette @{ Fill = 196 }
+            $c = & $p.GetFillColor 0 1
+            $c | Should -Match '38;5;196'
+        }
+
+        It 'parseColor handles RGB arrays' {
+            $p = Get-TerminalPalette -ColorPalette @{ Fill = @(10,20,30) }
+            $c = & $p.GetFillColor 0 1
+            $c | Should -Match '38;2;10;20;30'
+        }
+    }
+
+    # =====================================================================================
+    Describe 'New-Kvinc and New-kvstring' {
+        It 'New-Kvinc returns plain format when NO_COLOR is set' {
+            $r = New-Kvinc 'key' 'value'
+            $r | Should -Be '{ key : value }'
+        }
+
+        It 'New-Kvinc with a type returns typed plain format' {
+            $r = New-Kvinc 'host' 'example.com' -type 'inf'
+            $r | Should -Match 'INF'
+            $r | Should -Match 'host'
+            $r | Should -Match 'example.com'
+        }
+
+        It 'New-Kvinc defaults to type none when omitted' {
+            $r = New-Kvinc 'a' 'b'
+            $r | Should -Be '{ a : b }'
+        }
+
+        It 'New-kvstring replaces a single {kv:key=value} token' {
+            $r = New-kvstring 'User is {kv:user=Alice}'
+            $r | Should -Match 'user'
+            $r | Should -Match 'Alice'
+            $r | Should -Not -Match '\{kv:'
+        }
+
+        It 'New-kvstring replaces multiple tokens left to right' {
+            $r = New-kvstring 'A={kv:a=1} B={kv:b=2}'
+            $r | Should -Match 'a'
+            $r | Should -Match 'b'
+        }
+
+        It 'New-kvstring handles level-prefixed tokens' {
+            $r = New-kvstring 'Status: {inf:kv:code=200}'
+            $r | Should -Match 'code'
+            $r | Should -Match '200'
+        }
+    }
+
+    # =====================================================================================
+    Describe 'Clap-TruncateAnsi and Pad-AnsiString' {
+        It 'Clap-TruncateAnsi returns empty string for MaxVisible=0' {
+            Clap-TruncateAnsi -Text 'hello' -MaxVisible 0 | Should -Be ''
+        }
+
+        It 'Clap-TruncateAnsi truncates plain text to MaxVisible chars' {
+            $r = Clap-TruncateAnsi -Text 'hello world' -MaxVisible 5
+            $r | Should -Be 'hello'
+        }
+
+        It 'Clap-TruncateAnsi preserves ANSI sequences verbatim (they do not count as visible)' {
+            $esc = [char]27
+            $colored = "${esc}[32mGREEN${esc}[0m"
+            $r = Clap-TruncateAnsi -Text $colored -MaxVisible 5
+            $r | Should -Match "$([regex]::Escape("${esc}[32m"))"
+            # only 5 visible chars => "GREEN" is complete
+            (& { $r -replace "\x1B\[[0-9;]*[a-zA-Z]", '' }).Length | Should -BeLessOrEqual 5
+        }
+
+        It 'Pad-AnsiString left-pads to the target width' {
+            $r = Pad-AnsiString 'hi' -Width 6 -Align Left
+            $r.Length | Should -Be 6
+            $r | Should -Match '^hi '
+        }
+
+        It 'Pad-AnsiString right-pads to the target width' {
+            $r = Pad-AnsiString 'hi' -Width 6 -Align Right
+            $r.Length | Should -Be 6
+            $r | Should -Match ' hi$'
+        }
+
+        It 'Pad-AnsiString truncates text longer than Width' {
+            $r = Pad-AnsiString 'hello world' -Width 5 -Truncate
+            (& { $r -replace "\x1B\[[0-9;]*[a-zA-Z]", '' }).Length | Should -BeLessOrEqual 5
+        }
+
+        It 'Set-ClapAnsiPattern overrides the pattern used for stripping' {
+            $orig = $script:ClapAnsiPattern
+            Set-ClapAnsiPattern -Pattern ([regex]'XXX')
+            $script:ClapAnsiPattern.ToString() | Should -Be 'XXX'
+            Set-ClapAnsiPattern -Pattern $orig  # restore
+        }
+    }
+
+    # =====================================================================================
+    Describe '_GxOpenUrl' {
+        It 'returns false for a non-http url' {
+            _GxOpenUrl 'ftp://example.com' | Should -BeFalse
+        }
+
+        It 'returns false for an empty string' {
+            _GxOpenUrl '' | Should -BeFalse
+        }
+
+        It 'returns false for a bare path' {
+            _GxOpenUrl '/tmp/some/path' | Should -BeFalse
+        }
+    }
+
+    # =====================================================================================
+    Describe 'gx semver mode' {
+        It 'reports version, last tag, bump and commits from a repo with a tag' {
+            New-Linked 'sem1' | Out-Null
+            git tag -a v1.0.0 -m 'base'
+            Add-Commit 'a.txt' '1' 'feat: alpha'
+            $r = gx semver -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (Row $r 'version').Value | Should -Be '1.1.0'
+            (Row $r 'last tag').Value | Should -Be 'v1.0.0'
+            (Row $r 'bump').Value | Should -Be 'minor'
+            $r.Data.semver.Version | Should -Be '1.1.0'
+        }
+
+        It 'reports 0.0.0 / none for a fresh repo with no commits' {
+            New-TestRepo 'sem2' | Out-Null
+            $r = gx semver -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (Row $r 'version').Value | Should -Be '0.0.0'
+            (Row $r 'bump').Value | Should -Be 'none'
+        }
+
+        It 'fails outside a git repository' {
+            $d = Join-Path $script:Sandbox 'sem-noRepo'; New-Item -ItemType Directory $d -Force | Out-Null
+            Set-Location $d
+            $env:GIT_CEILING_DIRECTORIES = $script:Sandbox
+            try { (gx semver -PassThru -Quiet).Ok | Should -BeFalse } finally { $env:GIT_CEILING_DIRECTORIES = $null }
+        }
+
+        It 'surfaces custom -MinorTypes and -PatchTypes' {
+            New-TestRepo 'sem3' | Out-Null
+            Add-Commit 'a.txt' '1' 'docs: update readme'
+            $r = gx semver -MinorTypes docs -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (Row $r 'bump').Value | Should -Be 'minor'
+        }
+    }
+
+    # =====================================================================================
+    Describe 'pull edge cases' {
+        It 'pull -Merge succeeds when branches diverge' {
+            New-Linked 'plm-div' | Out-Null
+            $a = Get-Location
+            $b = Join-Path $script:Sandbox 'work/plm-div-b'
+            gx clone plm-div -Dir $b -NoCd -Quiet
+            Set-Location $b; Add-Commit 'b.txt' '1' 'from b'; git push -q 2>&1 | Out-Null
+            Set-Location $a.Path; Add-Commit 'a.txt' '1' 'from a'
+            (gx pull -Merge -PassThru -Quiet).Ok | Should -BeTrue
+            (git log -1 --format=%s) | Should -Match 'Merge'
+        }
+
+        It 'pull reports diverged when ff-only and no merge flag' {
+            New-Linked 'plff-div' | Out-Null
+            $a = Get-Location
+            $b = Join-Path $script:Sandbox 'work/plff-div-b'
+            gx clone plff-div -Dir $b -NoCd -Quiet
+            Set-Location $b; Add-Commit 'b.txt' '1' 'from b'; git push -q 2>&1 | Out-Null
+            Set-Location $a.Path; Add-Commit 'a.txt' '1' 'from a'
+            $r = gx pull -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            AnyText $r 'diverged' | Should -BeTrue
+        }
+
+        It 'pull -Autostash stashes and restores local changes' {
+            New-Linked 'pl-stash' | Out-Null
+            $a = Get-Location
+            $b = Join-Path $script:Sandbox 'work/pl-stash-b'
+            gx clone pl-stash -Dir $b -NoCd -Quiet
+            Set-Location $b; Add-Commit 'b.txt' '1' 'remote'; git push -q 2>&1 | Out-Null
+            Set-Location $a.Path
+            Add-Content readme.md 'local-unstaged'
+            (gx pull -Autostash -Rebase -PassThru -Quiet).Ok | Should -BeTrue
+        }
+    }
+
+    # =====================================================================================
+    Describe 'diff edge cases' {
+        BeforeEach {
+            New-TestRepo ('df-' + [guid]::NewGuid().ToString('N').Substring(0, 6)) -Commit | Out-Null
+            Add-Commit 'a.txt' 'v1' 'feat: first'; Add-Commit 'b.txt' 'v1' 'fix: second'
+        }
+
+        It 'diff -NameOnly with valid refs shows only file names' {
+            git tag t0 HEAD~1
+            $o = gx diff -NoPager -Quiet -Base t0 -To HEAD -NameOnly | Out-String
+            $o | Should -Match 'b.txt'
+            $o | Should -Not -Match '\+\+'
+        }
+
+        It 'diff -Stat shows insertion/deletion counts' {
+            Add-Content a.txt 'changed'
+            $o = gx diff -Quiet -NoPager -Stat | Out-String
+            $o | Should -Match 'insertion|changed'
+        }
+
+        It 'diff -To without -Base fails with a clear message' {
+            (gx diff -To HEAD -PassThru -Quiet).Ok | Should -BeFalse
+        }
+    }
+
+    # =====================================================================================
+    Describe 'commit edge cases' {
+        It 'commit with -NoVerify skips hooks' {
+            New-TestRepo 'cv-nv' | Out-Null
+            Set-Content a.txt 1
+            # Write a hook that always fails
+            $hookDir = '.git/hooks'; New-Item -ItemType Directory $hookDir -Force | Out-Null
+            Set-Content "$hookDir/pre-commit" "#!/bin/sh`nexit 1"
+            (Get-Item "$hookDir/pre-commit").Mode | Out-Null
+            chmod +x "$hookDir/pre-commit"
+            $r = gx commit hook test -AddAll -NoVerify -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+        }
+
+        It 'commit -Signoff adds a Signed-off-by trailer' {
+            New-TestRepo 'cv-so' | Out-Null
+            Set-Content a.txt 1
+            gx commit signoff test -AddAll -Signoff -Quiet
+            ((git log -1 --format=%B) -join "`n") | Should -Match 'Signed-off-by'
+        }
+
+        It 'commit shows working tree clean message when nothing staged' {
+            New-TestRepo 'cv-clean' -Commit | Out-Null
+            $r = gx commit nothing -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            AnyText $r 'clean|nothing staged' | Should -BeTrue
+        }
+
+        It 'commit lists unstaged files when nothing is staged' {
+            New-TestRepo 'cv-list' | Out-Null
+            Set-Content a.txt 1  # untracked, not staged
+            $r = gx commit x -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            AnyText $r 'a.txt|stage with -Add|AddAll' | Should -BeTrue
+        }
+
+        It 'commit -Push with no origin remote fails cleanly' {
+            New-TestRepo 'cv-nopush' | Out-Null
+            Set-Content a.txt 1
+            $r = gx commit push test -AddAll -Push -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+        }
+    }
+
+    # =====================================================================================
+    Describe 'setup edge cases' {
+        It 'setup outside a repository fails' {
+            $d = Join-Path $script:Sandbox 'su-norepo'; New-Item -ItemType Directory $d -Force | Out-Null; Set-Location $d
+            $env:GIT_CEILING_DIRECTORIES = $script:Sandbox
+            try { (gx setup -PassThru -Quiet).Ok | Should -BeFalse } finally { $env:GIT_CEILING_DIRECTORIES = $null }
+        }
+
+        It '-Push with no commits yet warns and does not fail hard' {
+            [void](New-Remote 'su-nocom')
+            New-TestRepo 'su-nocom' | Out-Null  # no -Commit
+            $r = gx setup -Name su-nocom -Push -PassThru -Quiet
+            # Ok can be true (setup itself works) but push warns about no commits
+            HasRow $r 'push' 'warn' | Should -BeTrue
+        }
+
+        It '-PushUrl is stored when -TokenStorage Url' {
+            New-TestRepo 'su-purl' -Commit | Out-Null
+            $r = gx setup -Name su-purl `
+                -PushUrl "https://sgkens:$($script:Token)@gitlab.com/sgkens/su-purl.git" `
+                -TokenStorage Url -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (git config --local --get remote.origin.pushurl) | Should -Match ([regex]::Escape($script:Token))
+        }
+
+        It 'shows mirror info when a mirror remote is configured' {
+            New-Linked 'su-mir' | Out-Null
+            gx setup -Quiet
+            [void](New-Remote 'mi-su' -Url 'https://github.com/sgkens/su-mir.git')
+            gx mirror 'https://github.com/sgkens/su-mir.git' -Quiet
+            $r = gx setup -PassThru -Quiet
+            AnyText $r 'mirror' | Should -BeTrue
+        }
+    }
+
+    # =====================================================================================
+    Describe 'mirror edge cases' {
+        It 'mirror with no url and no existing mirror remote fails' {
+            New-Linked 'mi-nourl' | Out-Null
+            (gx mirror -PassThru -Quiet).Ok | Should -BeFalse
+        }
+
+        It 'mirror -MirrorRefs false clears the mirror flag' {
+            [void](New-Remote 'mi-clr' -Url 'https://github.com/sgkens/mi-clr.git')
+            New-Linked 'mi-clr' | Out-Null
+            gx mirror 'https://github.com/sgkens/mi-clr.git' -Quiet
+            git config --local remote.mirror.mirror true
+            $r = gx mirror -MirrorRefs:$false -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            HasRow $r 'mirror flag' | Should -BeTrue
+        }
+
+        It 'mirror updates the url when called again with a different url' {
+            [void](New-Remote 'mi-upd' -Url 'https://github.com/sgkens/mi-upd.git')
+            New-Linked 'mi-upd' | Out-Null
+            gx mirror 'https://github.com/sgkens/mi-upd.git' -Quiet
+            [void](New-Remote 'mi-upd2' -Url 'https://github.com/sgkens/mi-upd2.git')
+            $r = gx mirror 'https://github.com/sgkens/mi-upd2.git' -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (git config --local --get remote.mirror.url) | Should -Match 'mi-upd2'
+        }
+
+        It 'mirror -Push -All sends branches and tags' {
+            [void](New-Remote 'mi3-m' -Url 'https://github.com/sgkens/mi3.git')
+            New-Linked 'mi3' | Out-Null
+            git branch -q feat/mi3; git tag v0.1.0
+            gx mirror 'https://github.com/sgkens/mi3.git' -Quiet
+            (gx mirror -Push -All -PassThru -Quiet).Ok | Should -BeTrue
+            $m = Join-Path $script:Sandbox 'remotes/mi3-m.git'
+            (git -C $m for-each-ref --format='%(refname)') | Should -Contain 'refs/tags/v0.1.0'
+        }
+    }
+
+    # =====================================================================================
+    Describe 'branch and switch edge cases' {
+        It 'branch -All includes remote-tracking refs' {
+            New-Linked 'ba-all' | Out-Null
+            $r = gx branch -All -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            ($r.Data.branches | ForEach-Object { $_.Name }) | Should -Contain 'origin/main'
+        }
+
+        It 'branch -Clean with -Force removes unmerged gone branches' {
+            New-Linked 'bclf' | Out-Null
+            git checkout -q -b feat/gone; Add-Commit 'g.txt' '1' 'gone'; git push -q -u origin feat/gone 2>&1 | Out-Null
+            git checkout -q main
+            # Delete the branch on the remote without merging
+            git -C (Join-Path $script:Sandbox 'remotes/bclf.git') branch -q -D feat/gone
+            git fetch -q --prune
+            $r = gx branch -Clean -Force -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (git branch --list feat/gone) | Should -BeNullOrEmpty
+        }
+
+        It 'switch when already on the target branch says so' {
+            New-Linked 'sw-same' | Out-Null
+            $r = gx switch main -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            AnyText $r 'already on' | Should -BeTrue
+        }
+
+        It 'switch fails with a clear message for an invalid name' {
+            New-Linked 'sw-inv' | Out-Null
+            (gx switch 'bad name!' -PassThru -Quiet).Ok | Should -BeFalse
+        }
+
+        It 'switch -Create -Base creates branch from the specified base' {
+            New-Linked 'sw-base' | Out-Null
+            git tag v1
+            (gx switch feat/based -Create -Base v1 -PassThru -Quiet).Ok | Should -BeTrue
+            (git branch --show-current) | Should -Be 'feat/based'
+        }
+    }
+
+    # =====================================================================================
+    Describe 'check edge cases' {
+        It 'check warns when the token variable is not set' {
+            New-TestRepo 'ck-novar' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/sgkens/ck-novar.git'
+            gx setup -Quiet
+            $env:GITLAB_API_KEY = $null
+            try {
+                $r = gx check -PassThru -Quiet
+                ($r.Rows | Where-Object { $_.Level -eq 'warn' -and $_.Value -match 'GITLAB_API_KEY' }) | Should -Not -BeNullOrEmpty
+            } finally { $env:GITLAB_API_KEY = $script:Token }
+        }
+
+        It 'check -Remote targets only the named remote' {
+            New-Linked 'ck-named' | Out-Null
+            gx setup -Quiet
+            $r = gx check -Remote origin -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+        }
+
+        It 'check reports no remotes when none are configured' {
+            New-TestRepo 'ck-none' -Commit | Out-Null
+            $r = gx check -PassThru -Quiet
+            HasRow $r 'remotes' 'warn' | Should -BeTrue
+        }
+    }
+
+    # =====================================================================================
+    Describe 'push edge cases' {
+        It 'push -Tags pushes annotated tags' {
+            New-Linked 'pu-tags' | Out-Null
+            git tag -a v9.0.0 -m 'release'
+            (gx push -Tags -PassThru -Quiet).Ok | Should -BeTrue
+            (git -C (Join-Path $script:Sandbox 'remotes/pu-tags.git') tag -l) | Should -Contain 'v9.0.0'
+        }
+
+        It 'push -Force warns about force-with-lease' {
+            New-Linked 'pu-force' | Out-Null
+            Add-Commit 'f.txt' '1' 'local'
+            $r = gx push -Force -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            HasRow $r 'force' 'warn' | Should -BeTrue
+        }
+
+        It 'push -Mr fails when the remote is not GitLab' {
+            [void](New-Remote 'pu-mr-gh' -Url 'https://github.com/sgkens/pu-mr-gh.git')
+            New-TestRepo 'pu-mr-gh' -Commit | Out-Null
+            git remote add origin 'https://github.com/sgkens/pu-mr-gh.git'
+            git push -q -u origin main 2>&1 | Out-Null
+            Add-Commit 'f.txt' '1' 'local'
+            (gx push -Mr -PassThru -Quiet).Ok | Should -BeFalse
+        }
+    }
 }
