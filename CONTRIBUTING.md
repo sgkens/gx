@@ -2,7 +2,7 @@
 
 Contributions should preserve `gx` safety defaults and its direct-script interface.
 
-## Development
+## **Development**
 
 Requirements are PowerShell 7.3 or later, Git, Pester 5, and PSScriptAnalyzer.
 
