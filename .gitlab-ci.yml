@@ -34,5 +34,5 @@ coverage:
   script:
     - echo "🟣 Collecting test coverage..."
     - command -v codecov
-    - codecov --verbose upload-process --disable-search --fail-on-error -r "sgkens/gx" -n "gx-${CI_COMMIT_SHORT_SHA}" -t $ENV:CODECOV_TOKEN -f ./coverage.xml
+    - codecov --verbose upload-process -r sgkens/gx -n gx-${CI_COMMIT_SHORT_SHA} -t $ENV:CODECOV_TOKEN -f ./coverage.xml
   allow_failure: false
