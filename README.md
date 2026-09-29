@@ -163,10 +163,10 @@ On Windows, Git for Windows supplies the `sh` that git uses to run the credentia
 
 `gx` can be loaded as a module or used directly:
 
-|                                      | Command                                       | What happens                                                                                                                                                                  |
-| ------------------------------------ | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Module** (recommended for sharing) | `Import-Module ./gx.psd1`                     | exports `gx`; implementation helpers remain private                                                                                                                           |
-| **Dot-source** (single-file use)     | `. ./gx.ps1` then `gx status`                 | defines the `gx` command and implementation helpers in your session                                                                                                           |
+|                                      | Command                                                             | What happens                                                                                                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Module** (recommended for sharing) | `Import-Module ./gx.psd1`                                           | exports `gx`; implementation helpers remain private                                                                                                            |
+| **Dot-source** (single-file use)     | `. ./gx.ps1` then `gx status`                                       | defines the `gx` command and implementation helpers in your session                                                                                            |
 | **Run it**                           | `./gx status` (Unix), `./gx.ps1 status`, `pwsh -File gx.ps1 status` | runs one command and exits; the exit code is passed through. Nothing stays defined and no `gx` command remains afterwards. With no arguments it shows the help |
 
 > Running the file **cannot** define the command in your session: PowerShell discards what a script defines when it ends.
@@ -423,12 +423,12 @@ gx rebase [base] [-Autostash] [-Interactive] [-UpdateRefs]
 gx rebase -Continue | -Abort | -Skip
 ```
 
-| Option                         |                                                               |
-| ------------------------------ | ------------------------------------------------------------- |
-| `-Autostash`                   | stash tracked changes around the rebase and restore them      |
+| Option                         |                                                                 |
+| ------------------------------ | --------------------------------------------------------------- |
+| `-Autostash`                   | stash tracked changes around the rebase and restore them        |
 | `-Interactive`                 | open Git's native rebase todo editor on an interactive terminal |
-| `-UpdateRefs`                  | move other local refs that point into rewritten commits       |
-| `-Continue`, `-Skip`, `-Abort` | continue after resolving, omit the current commit, or restore |
+| `-UpdateRefs`                  | move other local refs that point into rewritten commits         |
+| `-Continue`, `-Skip`, `-Abort` | continue after resolving, omit the current commit, or restore   |
 
 ```powershell
 gx rebase
@@ -449,8 +449,8 @@ gx stage -All | -Tracked | -Patch
 gx stage <paths...> -Intent
 ```
 
-| Option     |                                                             |
-| ---------- | ----------------------------------------------------------- |
+| Option     |                                                              |
+| ---------- | ------------------------------------------------------------ |
 | `-All`     | stage tracked and untracked changes                          |
 | `-Tracked` | stage modifications and deletions of tracked files           |
 | `-Patch`   | select hunks through Git's native interactive terminal UI    |
@@ -990,13 +990,13 @@ Built-in `.gitignore` templates: `secrets os editor powershell node python dotne
 
 ## Environment variables
 
-| Variable                                            | Purpose                                                   |
-| --------------------------------------------------- | --------------------------------------------------------- |
-| `GITLAB_API_KEY`, `GITHUB_API_KEY`, `GITEA_API_KEY` | tokens, read by the credential helper at use time         |
-| `GX_USER`, `GX_NAMESPACE`                           | override `user` / `namespace`                             |
-| `GX_CONFIG`                                         | path of the config file                                   |
-| `GX_TRACE_LOG`                                      | file that `-CommandTrace` appends every traced command to |
-| `NO_COLOR`                                          | disable colour                                            |
+| Variable                                                | Purpose                                                   |
+| ------------------------------------------------------- | --------------------------------------------------------- |
+| `GITLAB_API_KEY`, `GITHUB_A .. PI_KEY`, `GITEA_API_KEY` | tokens, read by the credential helper at use time         |
+| `GX_USER`, `GX_NAMESPACE`                               | override `user` / `namespace`                             |
+| `GX_CONFIG`                                             | path of the config file                                   |
+| `GX_TRACE_LOG`                                          | file that `-CommandTrace` appends every traced command to |
+| `NO_COLOR`                                              | disable colour                                            |
 
 ## Tab completion
 
