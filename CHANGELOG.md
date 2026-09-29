@@ -7,6 +7,7 @@ All notable changes to `gx` are recorded in this file.
 ### Added
 
 - Safe standalone `gx rebase [base]` workflows with default-branch resolution, autostash, interactive todo editing, ref updates, dry-run previews, structured output, and guided continue/skip/abort conflict recovery.
+- First-class `gx stage` and `gx unstage` workflows with literal path handling, tracked/all/intent-to-add modes, interactive patch selection, unborn-branch safety, dry-run previews, and structured index summaries.
 
 ## 0.1.0
 

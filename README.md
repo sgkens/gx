@@ -23,6 +23,8 @@
         - [`gx branch`](#gx-branch)
         - [`gx switch`](#gx-switch)
         - [`gx rebase`](#gx-rebase)
+        - [`gx stage`](#gx-stage)
+        - [`gx unstage`](#gx-unstage)
         - [`gx undo`](#gx-undo)
         - [`gx tag`](#gx-tag)
         - [`gx log`](#gx-log)
@@ -436,6 +438,48 @@ gx rebase -Continue
 ```
 
 Conflicts list each affected file and the exact continue, skip, and abort commands. Interactive rebases require a real terminal. For scripted `-Continue`, explicitly set `GIT_EDITOR` to a non-interactive command.
+
+#### `gx stage`
+
+Add selected changes to the index and show what remains.
+
+```powershell
+gx stage <paths...>
+gx stage -All | -Tracked | -Patch
+gx stage <paths...> -Intent
+```
+
+| Option     |                                                             |
+| ---------- | ----------------------------------------------------------- |
+| `-All`     | stage tracked and untracked changes                          |
+| `-Tracked` | stage modifications and deletions of tracked files           |
+| `-Patch`   | select hunks through Git's native interactive terminal UI    |
+| `-Intent`  | make untracked paths visible to diff without staging content |
+
+```powershell
+gx stage src/app.ps1 tests/app.Tests.ps1
+gx stage -All
+gx stage new-file.ps1 -Intent
+gx stage src/app.ps1 -Patch
+```
+
+Paths are passed to Git after `--`, so filenames beginning with a dash remain literal. `-Patch` requires an interactive terminal, except when previewed with `-DryRun`.
+
+#### `gx unstage`
+
+Remove paths from the index without changing their worktree content.
+
+```powershell
+gx unstage [paths...] [-Patch]
+```
+
+With no paths, the complete index is unstaged. The command also works before the first commit, when `HEAD` does not exist.
+
+```powershell
+gx unstage
+gx unstage src/app.ps1
+gx unstage src/app.ps1 -Patch
+```
 
 #### `gx undo`
 
@@ -990,12 +1034,12 @@ Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser    # once
 Invoke-Pester ./tests -Output Detailed
 ```
 
-351 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
+361 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
 repositories standing in for GitLab/GitHub through `url.<path>.insteadOf`, and fake tokens. **No network, and your real git
 config and `~/.gx.json` are never read or written.** Coverage: URL parsing, masking, error translation, config loading,
 the credential helper (a real `git credential fill`, with the variable set and unset), `setup` (idempotence, migration,
 storage modes, injection validation, second remotes, identity), `init` scaffolds, `ignore`, `commit` and every guard rule,
-`status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`rebase`/`undo`, `tag` (bump, push, delete),
+`status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`rebase`/`stage`/`unstage`/`undo`, `tag` (bump, push, delete),
 `open` URL building per provider, `sweep` including `-Fix`, `log`/`diff`, `clone`/`mirror`, `check`/`doctor`, the help system
 (every mode documented, colour on and off), the scripting surface, running the file directly (argument forwarding, exit codes), command tracing (masking, log file, reset), and parameter completion.
 

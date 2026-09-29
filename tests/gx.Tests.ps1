@@ -1007,6 +1007,80 @@ Describe 'gx' {
             } finally { $env:GIT_EDITOR = $savedEditor }
             (gx rebase -Abort -PassThru -Quiet).Ok | Should -BeTrue
         }
+        It 'stages only the selected literal paths and reports the index' {
+            New-TestRepo 'st-selected' -Commit | Out-Null
+            Set-Content one.txt one; Set-Content two.txt two
+            $r = gx stage one.txt -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Data.staging.StagedCount | Should -Be 1
+            (git diff --cached --name-only) | Should -Contain 'one.txt'
+            ((git status --porcelain) -join "`n") | Should -Match '\?\? two.txt'
+        }
+        It 'supports all, tracked-only and intent-to-add staging' {
+            New-TestRepo 'st-modes' -Commit | Out-Null
+            Add-Content readme.md tracked; Set-Content new.txt new
+            (gx stage -Tracked -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain 'readme.md'
+            (git diff --cached --name-only) | Should -Not -Contain 'new.txt'
+            (gx stage new.txt -Intent -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --name-only) | Should -Contain 'new.txt'
+            gx unstage -Quiet
+            (gx stage -All -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain 'new.txt'
+        }
+        It 'treats a filename beginning with a dash as a path, not an option' {
+            New-TestRepo 'st-dash' -Commit | Out-Null
+            Set-Content -LiteralPath './-odd.txt' -Value 'odd'
+            (gx stage '-odd.txt' -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain '-odd.txt'
+            (gx unstage '-odd.txt' -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Not -Contain '-odd.txt'
+        }
+        It 'unstages selected paths or the whole index without changing files' {
+            New-TestRepo 'unstage-head' -Commit | Out-Null
+            Set-Content one.txt one; Set-Content two.txt two; git add -- one.txt two.txt
+            (gx unstage one.txt -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Not -Contain 'one.txt'
+            (Get-Content one.txt -Raw).Trim() | Should -Be 'one'
+            (gx unstage -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            (Get-Content two.txt -Raw).Trim() | Should -Be 'two'
+        }
+        It 'unstages safely before the first commit and preserves worktree content' {
+            New-TestRepo 'unstage-unborn' | Out-Null
+            Set-Content first.txt first; git add -- first.txt
+            (gx unstage -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            (Get-Content first.txt -Raw).Trim() | Should -Be 'first'
+            (git status --porcelain) | Should -Match '\?\? first.txt'
+        }
+        It 'validates staging selectors and interactive terminal requirements' {
+            New-TestRepo 'st-guard' -Commit | Out-Null
+            Set-Content one.txt one
+            AnyText (gx stage -PassThru -Quiet) 'provide paths' | Should -BeTrue
+            AnyText (gx stage -All -Tracked -PassThru -Quiet) 'mutually exclusive' | Should -BeTrue
+            AnyText (gx stage one.txt -Patch -PassThru -Quiet) 'interactive terminal' | Should -BeTrue
+            git add one.txt
+            AnyText (gx unstage one.txt -Patch -PassThru -Quiet) 'interactive terminal' | Should -BeTrue
+        }
+        It 'previews patch staging and unstaging without changing the index' {
+            New-TestRepo 'st-dry' -Commit | Out-Null
+            Add-Content readme.md changed
+            $stage = gx stage readme.md -Patch -DryRun -PassThru -Quiet
+            $stage.Ok | Should -BeTrue
+            AnyText $stage 'add --patch -- readme.md' | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            git add readme.md
+            $unstage = gx unstage readme.md -Patch -DryRun -PassThru -Quiet
+            $unstage.Ok | Should -BeTrue
+            AnyText $unstage 'restore --staged --patch -- readme.md' | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain 'readme.md'
+        }
+        It 'refuses patch unstaging before the first commit' {
+            New-TestRepo 'unstage-unborn-patch' | Out-Null
+            Set-Content first.txt first; git add first.txt
+            AnyText (gx unstage first.txt -Patch -PassThru -Quiet) 'before the first commit' | Should -BeTrue
+        }
         It 'undo soft-resets commits and keeps the changes staged' {
             New-Linked 'u1' | Out-Null
             Add-Commit 'a.txt' '1' 'one'; Add-Commit 'b.txt' '1' 'two'
@@ -1400,7 +1474,7 @@ Describe 'gx' {
         }
         It 'gx <Mode> -Help prints usage, options and examples' -ForEach @(
             @{ Mode = 'status' }, @{ Mode = 'setup' }, @{ Mode = 'init' }, @{ Mode = 'clone' }, @{ Mode = 'mirror' }, @{ Mode = 'commit' }
-            @{ Mode = 'push' }, @{ Mode = 'pull' }, @{ Mode = 'sync' }, @{ Mode = 'branch' }, @{ Mode = 'switch' }, @{ Mode = 'rebase' }, @{ Mode = 'undo' }
+            @{ Mode = 'push' }, @{ Mode = 'pull' }, @{ Mode = 'sync' }, @{ Mode = 'branch' }, @{ Mode = 'switch' }, @{ Mode = 'rebase' }, @{ Mode = 'stage' }, @{ Mode = 'unstage' }, @{ Mode = 'undo' }
             @{ Mode = 'tag' }, @{ Mode = 'log' }, @{ Mode = 'diff' }, @{ Mode = 'open' }, @{ Mode = 'ignore' }, @{ Mode = 'config' }
             @{ Mode = 'check' }, @{ Mode = 'doctor' }, @{ Mode = 'sweep' }
         ) {

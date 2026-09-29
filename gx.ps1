@@ -21,7 +21,7 @@
       Mirror   add/refresh a 'mirror' remote (separate host or project), optional push
       Commit   git commit -m wrapper: conventional prefix, staged summary, -Push
       Push / Pull / Sync   push (-Mr -Open -Force), ff-only pull, fetch --prune + fast-forward
-      Branch / Switch / Rebase / Undo   branches, switching, safe rebases, soft-undo commits
+      Branch / Switch / Rebase / Stage / Unstage / Undo   daily branch and index workflows
       Log      graph log, Compact or Full
       Diff     file / staged / branch-vs-main
       Tag / Open   list/create/bump tags; open MR, issues, CI, files in the browser
@@ -58,7 +58,7 @@ using namespace System.Collections.Generic
 param(
     [Parameter(Position = 0)]
     [ValidateSet('Status', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
-                 'Branch', 'Switch', 'Rebase', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
+                 'Branch', 'Switch', 'Rebase', 'Stage', 'Unstage', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
                  'Check', 'Doctor', 'Sweep', 'Semver', 'Help')]
     [string]$Mode,
 
@@ -134,6 +134,8 @@ param(
     [switch]$Skip,
     [switch]$Interactive,
     [switch]$UpdateRefs,
+    [switch]$Patch,
+    [switch]$Intent,
     [ValidateSet('major', 'minor', 'patch')]
     [string]$Bump,
     [switch]$Lightweight,
@@ -3060,6 +3062,93 @@ function _GxRebase {
     }
 }
 
+function _GxStagingSummary {
+    param([string]$Action, [string[]]$IntentPaths = @())
+    $index = _GxGit @('diff', '--cached', '--name-status')
+    $staged = @($index.Lines | Where-Object { $_.Trim() })
+    $work = _GxWorkStatus
+    $remaining = $work.Modified + $work.Untracked + $work.Unmerged
+    $script:GxData['staging'] = [ordered]@{
+        Action = $Action; Staged = $staged; StagedCount = $staged.Count
+        RemainingCount = $remaining; IntentPaths = @($IntentPaths)
+    }
+    _GxRow $(if ($staged.Count) { 'ok' } else { 'info' }) 'staged' "$($staged.Count) file(s) in the index"
+    foreach ($line in ($staged | Select-Object -First 12)) { _GxLine $line }
+    if ($staged.Count -gt 12) { _GxLine "... and $($staged.Count - 12) more" }
+    if ($IntentPaths.Count) { _GxRow 'info' 'intent' "$($IntentPaths.Count) path(s) added for diff review; content is not staged" }
+    if ($remaining) { _GxRow 'info' 'remaining' "$remaining worktree file(s) remain; review with gx diff" }
+    elseif ($staged.Count) { _GxRow 'info' 'next' 'review with gx diff -Staged, then gx commit <message>' }
+}
+
+function _GxStage {
+    param([hashtable]$o)
+    _GxHeader 'stage' (_GxCurrentBranch)
+    if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
+    $selectors = @('All', 'Tracked', 'Intent' | Where-Object { $o[$_] })
+    if ($selectors.Count -gt 1) { _GxRow 'fail' 'stage' '-All, -Tracked and -Intent are mutually exclusive'; return }
+    if ($o.Patch -and $selectors.Count) { _GxRow 'fail' 'stage' '-Patch cannot be combined with -All, -Tracked or -Intent'; return }
+    if (-not $o.Paths.Count -and -not $o.All -and -not $o.Tracked -and -not $o.Patch) {
+        _GxRow 'fail' 'stage' 'provide paths, or use -All, -Tracked or -Patch'
+        return
+    }
+    if ($o.Patch -and -not $script:GxDry -and -not (_GxCanPrompt)) {
+        _GxRow 'fail' 'stage' '-Patch requires a real interactive terminal'
+        return
+    }
+
+    $args = @('add')
+    if ($o.Patch)        { $args += '--patch' }
+    elseif ($o.All)      { $args += '--all' }
+    elseif ($o.Tracked)  { $args += '--update' }
+    elseif ($o.Intent)   { $args += '--intent-to-add' }
+    if ($o.Paths.Count) { $args += '--'; $args += $o.Paths }
+
+    if ($o.Patch -and -not $script:GxDry) {
+        _GxGitLive $args
+        if ($LASTEXITCODE -ne 0) { _GxRow 'fail' 'stage' "git add --patch exited $LASTEXITCODE"; return }
+    } else {
+        $result = _GxGit $args -Mutating
+        if (-not $result.Ok) { _GxRow 'fail' 'stage' $result.Text.Trim(); return }
+    }
+    if ($script:GxDry) { _GxRow 'dry' 'stage' 'repository unchanged'; return }
+    _GxStagingSummary 'stage' $(if ($o.Intent) { $o.Paths } else { @() })
+}
+
+function _GxUnstage {
+    param([hashtable]$o)
+    _GxHeader 'unstage' (_GxCurrentBranch)
+    if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
+    $hasHead = _GxRefExists 'HEAD'
+    if ($o.Patch -and -not $hasHead) {
+        _GxRow 'fail' 'unstage' '-Patch is unavailable before the first commit; use gx unstage [paths]'
+        return
+    }
+    if ($o.Patch -and -not $script:GxDry -and -not (_GxCanPrompt)) {
+        _GxRow 'fail' 'unstage' '-Patch requires a real interactive terminal'
+        return
+    }
+
+    if ($hasHead) {
+        $args = @('restore', '--staged')
+        if ($o.Patch) { $args += '--patch' }
+        if ($o.Paths.Count) { $args += '--'; $args += $o.Paths }
+        elseif (-not $o.Patch) { $args += @('--', ':/') }
+    } else {
+        $args = @('rm', '--cached', '-r', '--force', '--ignore-unmatch', '--')
+        if ($o.Paths.Count) { $args += $o.Paths } else { $args += ':/' }
+    }
+
+    if ($o.Patch -and -not $script:GxDry) {
+        _GxGitLive $args
+        if ($LASTEXITCODE -ne 0) { _GxRow 'fail' 'unstage' "git restore --patch exited $LASTEXITCODE"; return }
+    } else {
+        $result = _GxGit $args -Mutating
+        if (-not $result.Ok) { _GxRow 'fail' 'unstage' $result.Text.Trim(); return }
+    }
+    if ($script:GxDry) { _GxRow 'dry' 'unstage' 'repository unchanged'; return }
+    _GxStagingSummary 'unstage'
+}
+
 function _GxUndo {
     param([hashtable]$o)
     _GxHeader 'undo' (_GxCurrentBranch)
@@ -3358,6 +3447,8 @@ Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterN
         '^(?i:log)$'    { _GxCompleteFiles $w 'Log' }
         '^(?i:switch)$' { _GxCompleteBranches $w -IncludeRemote }
         '^(?i:rebase)$' { _GxCompleteRefs $w }
+        '^(?i:stage)$'  { _GxCompleteFiles $w 'Diff' }
+        '^(?i:unstage)$' { _GxGitLines @('diff', '--cached', '--name-only', '--relative') | Where-Object { $_ -like "$w*" } | Select-Object -Unique -First 50 | ForEach-Object { _GxCR $_ } }
         '^(?i:ignore)$' { _GxCompleteTemplates $w }
         '^(?i:tag)$'    { _GxCompleteTags $w }
         '^(?i:help)$'   { $script:GxDocs.Keys | Sort-Object | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ } }
@@ -4302,7 +4393,19 @@ $script:GxDocs = @{
         Options  = @(@('-Autostash', 'stash tracked changes around the rebase and restore them afterwards'), @('-Interactive', 'open Git''s native interactive rebase todo editor (terminal only)'), @('-UpdateRefs', 'move other local refs that point into the rewritten commits'), @('-Continue / -Skip / -Abort', 'continue after resolving, omit the current commit, or restore the original branch'))
         Examples = @('gx rebase', 'gx rebase origin/main -Autostash', 'gx rebase -Interactive main', 'gx rebase -Continue')
         Notes    = @('Without a base, gx uses the repository default branch. Conflicts list their files and the exact recovery commands.', 'For scripted -Continue, explicitly set GIT_EDITOR to a non-interactive editor command.') }
-    undo = @{ Group = 'everyday'; Order = 9
+    stage = @{ Group = 'everyday'; Order = 9
+        Summary  = 'stage selected changes, tracked changes, everything, or intent-to-add paths'
+        Usage    = @('gx stage <paths...>', 'gx stage -All | -Tracked | -Patch', 'gx stage <paths...> -Intent')
+        Options  = @(@('-All', 'stage all tracked and untracked changes'), @('-Tracked', 'stage modifications and deletions of tracked files'), @('-Patch', 'interactively select hunks in Git''s native terminal UI'), @('-Intent', 'mark untracked paths for review without staging their content'))
+        Examples = @('gx stage src/app.ps1', 'gx stage -All', 'gx stage new-file.ps1 -Intent', 'gx stage src/app.ps1 -Patch')
+        Notes    = @('Paths are passed after --, so names beginning with a dash are treated literally.') }
+    unstage = @{ Group = 'everyday'; Order = 10
+        Summary  = 'remove paths or selected hunks from the index while preserving worktree content'
+        Usage    = @('gx unstage [paths...] [-Patch]')
+        Options  = @(@('-Patch', 'interactively select staged hunks to remove from the index'))
+        Examples = @('gx unstage', 'gx unstage src/app.ps1', 'gx unstage src/app.ps1 -Patch')
+        Notes    = @('With no paths, unstages the entire index. Before the first commit, gx uses an index-only removal that keeps every worktree file.') }
+    undo = @{ Group = 'everyday'; Order = 11
         Summary  = 'soft-undo the last commit(s): changes stay staged'
         Usage    = @('gx undo [-Count n] [-Force]')
         Options  = @(@('-Count n', 'how many commits'), @('-Force', 'allow it when the commit is already on the upstream (you will need a force push later)'))
@@ -4616,11 +4719,11 @@ function gx {
         gx help <mode>     same
 
     .PARAMETER Mode
-        status setup init clone mirror commit push pull sync branch switch rebase undo tag log diff open
+        status setup init clone mirror commit push pull sync branch switch rebase stage unstage undo tag log diff open
         ignore config check doctor sweep semver help. Defaults to status. Case-insensitive; tab-completes.
 
     .PARAMETER Target
-        The words after the mode: the commit message, paths for log/diff, a repo for clone, a branch for switch,
+        The words after the mode: the commit message, paths for log/diff/stage/unstage, a repo for clone, a branch for switch,
         a rebase base, a tag name, folders for sweep, template names for ignore.
 
     .EXAMPLE
@@ -4651,7 +4754,7 @@ function gx {
     param(
         [Parameter(Position = 0)]
         [ValidateSet('Status', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
-                     'Branch', 'Switch', 'Rebase', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
+                     'Branch', 'Switch', 'Rebase', 'Stage', 'Unstage', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
                      'Check', 'Doctor', 'Sweep', 'Semver', 'Help')]
         [string]$Mode,
 
@@ -4735,6 +4838,8 @@ function gx {
         [switch]$Skip,
         [switch]$Interactive,
         [switch]$UpdateRefs,
+        [switch]$Patch,
+        [switch]$Intent,
         [ValidateSet('major', 'minor', 'patch')]
         [string]$Bump,
         [switch]$Lightweight,
@@ -4848,6 +4953,8 @@ function gx {
                 'Switch' { _GxSwitch @{ Name = $first; Create = [bool]$Create; Base = $Base; Remote = $Remote } }
                 'Rebase' { _GxRebase @{ Base = (_GxFirst $Base $first); Continue = [bool]$Continue; Abort = [bool]$Abort; Skip = [bool]$Skip
                                          Autostash = [bool]$Autostash; Interactive = [bool]$Interactive; UpdateRefs = [bool]$UpdateRefs } }
+                'Stage'  { _GxStage @{ Paths = @($words); All = [bool]$All; Tracked = [bool]$Tracked; Patch = [bool]$Patch; Intent = [bool]$Intent } }
+                'Unstage' { _GxUnstage @{ Paths = @($words); Patch = [bool]$Patch } }
                 'Undo'   { _GxUndo @{ Count = $Count; Force = [bool]$Force } }
                 'Tag' {
                     _GxTag @{ Name = $first; Bump = $Bump; Message = $Message; Lightweight = [bool]$Lightweight; Base = $Base; Push = [bool]$Push
