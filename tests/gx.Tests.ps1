@@ -755,6 +755,27 @@ Describe 'gx' {
             $env:GIT_CEILING_DIRECTORIES = $script:Sandbox
             try { (gx status -PassThru -Quiet).Ok | Should -BeFalse } finally { $env:GIT_CEILING_DIRECTORIES = $null }
         }
+        It 'styles branch state and commit hash only in host output' {
+            New-Linked 'st-style' | Out-Null
+            $structured = gx status -PassThru -Quiet
+            (Row $structured 'branch').Value | Should -Be 'main -> origin/main  [in sync]'
+            (Row $structured 'branch').Value | Should -Not -Match "$([char]27)\["
+            (Row $structured 'last commit').Value | Should -Not -Match "$([char]27)\["
+
+            $script:GxRows = [System.Collections.Generic.List[object]]::new()
+            $script:GxQuiet = $false
+            $script:GxOk = $true
+            $script:GxColorOn = $true
+            try {
+                $hostText = ((& { _GxStatus @{ Detail = 'Compact' } } 6>&1) | ForEach-Object { $_.MessageData.ToString() }) -join "`n"
+                $hostText | Should -Match "$([char]27)\[3m"
+                $hostText | Should -Match "$([char]27)\[38;5;$($script:GxConfig.Palette.ok)m\[in sync\]"
+                $hostText | Should -Match "$([char]27)\[38;5;$($script:GxConfig.Palette.hash)m[0-9a-f]+"
+            } finally {
+                $script:GxColorOn = $false
+                $script:GxQuiet = $false
+            }
+        }
     }
 
     Describe 'push, pull and sync' {
@@ -836,7 +857,7 @@ Describe 'gx' {
         }
     }
 
-    Describe 'branch, switch and undo' {
+    Describe 'branch, switch, rebase and undo' {
         It 'lists branches in the result data' {
             New-Linked 'b-list' | Out-Null
             git branch -q feat/a
@@ -883,6 +904,108 @@ Describe 'gx' {
             Set-Location (Join-Path $script:Sandbox 'work/sw2'); git fetch -q
             (gx switch feat/remote -PassThru -Quiet).Ok | Should -BeTrue
             (git rev-parse --abbrev-ref '@{u}') | Should -Be 'origin/feat/remote'
+        }
+        It 'rebases onto the default branch and exposes structured result data' {
+            New-TestRepo 'rb-success' -Commit | Out-Null
+            git switch -qc feature; Add-Commit 'feature.txt' 'feature' 'feature work'
+            git switch -q main; Add-Commit 'main.txt' 'main' 'main work'
+            git switch -q feature
+            $r = gx rebase -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Data.rebase.Action | Should -Be 'start'
+            $r.Data.rebase.Base | Should -Be 'main'
+            $r.Data.rebase.State | Should -BeNullOrEmpty
+            (git merge-base HEAD main) | Should -Be (git rev-parse main)
+        }
+        It 'reports conflicts and abort restores the original branch state' {
+            New-TestRepo 'rb-abort' -Commit | Out-Null
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            $original = git rev-parse HEAD
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            $r = gx rebase main -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            $r.Data.rebase.State | Should -Be 'rebase in progress'
+            $r.Data.rebase.Conflicts | Should -Contain 'shared.txt'
+            AnyText $r 'gx rebase -Continue' | Should -BeTrue
+            (gx rebase -Abort -PassThru -Quiet).Ok | Should -BeTrue
+            (git branch --show-current) | Should -Be 'feature'
+            (git rev-parse HEAD) | Should -Be $original
+        }
+        It 'continues after conflict resolution with an explicitly configured script editor' {
+            New-TestRepo 'rb-continue' -Commit | Out-Null
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            (gx rebase main -PassThru -Quiet).Ok | Should -BeFalse
+            Set-Content shared.txt resolved; git add shared.txt
+            $savedEditor = $env:GIT_EDITOR
+            try {
+                $env:GIT_EDITOR = 'true'
+                (gx rebase -Continue -PassThru -Quiet).Ok | Should -BeTrue
+            } finally { $env:GIT_EDITOR = $savedEditor }
+            (git branch --show-current) | Should -Be 'feature'
+            (git merge-base HEAD main) | Should -Be (git rev-parse main)
+        }
+        It 'skips a conflicting commit and completes the rebase' {
+            New-TestRepo 'rb-skip' -Commit | Out-Null
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            (gx rebase main -PassThru -Quiet).Ok | Should -BeFalse
+            (gx rebase -Skip -PassThru -Quiet).Ok | Should -BeTrue
+            (Get-Content shared.txt -Raw).Trim() | Should -Be 'main'
+            (git rev-parse HEAD) | Should -Be (git rev-parse main)
+        }
+        It 'autostashes tracked changes and restores them after rebasing' {
+            New-TestRepo 'rb-autostash' -Commit | Out-Null
+            git switch -qc feature; Add-Commit 'feature.txt' 'feature' 'feature work'
+            git switch -q main; Add-Commit 'main.txt' 'main' 'main work'
+            git switch -q feature; Add-Content readme.md 'local edit'
+            AnyText (gx rebase main -PassThru -Quiet) 'use -Autostash' | Should -BeTrue
+            $r = gx rebase main -Autostash -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (Get-Content readme.md -Raw) | Should -Match 'local edit'
+            (git status --porcelain) | Should -Match 'readme.md'
+        }
+        It 'rejects detached HEAD, invalid bases and incompatible lifecycle actions' {
+            New-TestRepo 'rb-preflight' -Commit | Out-Null
+            (gx rebase missing -PassThru -Quiet).Ok | Should -BeFalse
+            git checkout -q --detach HEAD
+            AnyText (gx rebase main -PassThru -Quiet) 'detached HEAD' | Should -BeTrue
+            git switch -q main
+            AnyText (gx rebase -Continue -Abort -PassThru -Quiet) 'mutually exclusive' | Should -BeTrue
+        }
+        It 'keeps dry-run non-mutating and includes optional git flags' {
+            New-TestRepo 'rb-dry' -Commit | Out-Null
+            git switch -qc feature; Add-Commit 'feature.txt' 'feature' 'feature work'
+            git switch -q main; Add-Commit 'main.txt' 'main' 'main work'
+            git switch -q feature
+            $before = git rev-parse HEAD
+            $r = gx rebase main -Autostash -Interactive -UpdateRefs -DryRun -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (git rev-parse HEAD) | Should -Be $before
+            AnyText $r '--autostash' | Should -BeTrue
+            AnyText $r '--interactive' | Should -BeTrue
+            AnyText $r '--update-refs' | Should -BeTrue
+        }
+        It 'refuses interactive rebase and an implicit continue editor outside a terminal' {
+            New-TestRepo 'rb-noninteractive' -Commit | Out-Null
+            AnyText (gx rebase main -Interactive -PassThru -Quiet) 'interactive terminal' | Should -BeTrue
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            (gx rebase main -PassThru -Quiet).Ok | Should -BeFalse
+            $savedEditor = $env:GIT_EDITOR
+            try {
+                $env:GIT_EDITOR = $null
+                AnyText (gx rebase -Continue -PassThru -Quiet) 'may open an editor' | Should -BeTrue
+            } finally { $env:GIT_EDITOR = $savedEditor }
+            (gx rebase -Abort -PassThru -Quiet).Ok | Should -BeTrue
         }
         It 'undo soft-resets commits and keeps the changes staged' {
             New-Linked 'u1' | Out-Null
@@ -1266,6 +1389,10 @@ Describe 'gx' {
     }
 
     Describe 'help' {
+        It 'shows the prerelease product title' {
+            $all = (& { gx help } 6>&1 | Out-String)
+            $all | Should -Match 'Git Executor \(GX\) v0\.0\.0 prerelease'
+        }
         It 'has documentation for every mode the command accepts' {
             $modes = (Get-Command gx).Parameters['Mode'].Attributes.ValidValues | Where-Object { $_ -ne 'Help' }
             foreach ($m in $modes) { $script:GxDocs.ContainsKey($m.ToLower()) | Should -BeTrue -Because "mode '$m' needs an entry in the help table" }
@@ -1273,7 +1400,7 @@ Describe 'gx' {
         }
         It 'gx <Mode> -Help prints usage, options and examples' -ForEach @(
             @{ Mode = 'status' }, @{ Mode = 'setup' }, @{ Mode = 'init' }, @{ Mode = 'clone' }, @{ Mode = 'mirror' }, @{ Mode = 'commit' }
-            @{ Mode = 'push' }, @{ Mode = 'pull' }, @{ Mode = 'sync' }, @{ Mode = 'branch' }, @{ Mode = 'switch' }, @{ Mode = 'undo' }
+            @{ Mode = 'push' }, @{ Mode = 'pull' }, @{ Mode = 'sync' }, @{ Mode = 'branch' }, @{ Mode = 'switch' }, @{ Mode = 'rebase' }, @{ Mode = 'undo' }
             @{ Mode = 'tag' }, @{ Mode = 'log' }, @{ Mode = 'diff' }, @{ Mode = 'open' }, @{ Mode = 'ignore' }, @{ Mode = 'config' }
             @{ Mode = 'check' }, @{ Mode = 'doctor' }, @{ Mode = 'sweep' }
         ) {
@@ -1307,6 +1434,22 @@ Describe 'gx' {
             $plain = & $txt { _GxHelp }
             $plain | Should -Not -Match "$([char]27)\["
         }
+        It 'uses branded group headers and mode-specific parameter hints' {
+            $script:GxColorOn = $false
+            $plain = (& { _GxHelp } 6>&1 | Out-String)
+            $plain | Should -Match '░░░▌ Everyday ░'
+            $plain | Should -Match '░░░▌ Repo Setup ░'
+            $plain | Should -Match '(?m)^\s+params\s+-Rebase -Merge -Autostash'
+            $plain | Should -Match '(?m)^\s+params\s+-Create -Base'
+        }
+        It 'uses stable plain output when redirected' {
+            [Console]::IsOutputRedirected | Should -BeTrue
+            (_GxTerminalWidth) | Should -Be 120
+            $script:GxColorOn = _GxUseColor
+            $plain = (& { _GxHelp } 6>&1 | Out-String)
+            $plain | Should -Not -Match "$([char]27)\["
+            $plain | Should -Match 'with moved-line colouring'
+        }
         It 'draws the logo from the shared pixel grid (4 rows, half blocks)' {
             $script:GxColorOn = $false
             $b = @(_GxBanner)
@@ -1339,9 +1482,52 @@ Describe 'gx' {
         It '-Json prints parseable JSON and implies -Quiet' {
             New-Linked 'sc3' | Out-Null
             $j = gx status -Json
+            $j | Should -Not -Match "$([char]27)\["
             $o = $j | ConvertFrom-Json
             $o.Mode | Should -Be 'Status'
             $o.Ok | Should -BeTrue
+        }
+        It '-Json uses jq when it is available' {
+            New-Linked 'sc-jq' | Out-Null
+            Mock _GxFindJq { '/test/jq' }
+            Mock _GxInvokeJq {
+                param($Path, $Json)
+                [pscustomobject]@{ Ok = $true; Text = $Json }
+            }
+            $o = gx status -Json | ConvertFrom-Json
+            $o.Ok | Should -BeTrue
+            Should -Invoke _GxFindJq -Exactly 1
+            Should -Invoke _GxInvokeJq -Exactly 1 -ParameterFilter { $Path -eq '/test/jq' }
+        }
+        It '-Json falls back when jq fails' {
+            New-Linked 'sc-jq-fail' | Out-Null
+            Mock _GxFindJq { '/test/jq' }
+            Mock _GxInvokeJq { [pscustomobject]@{ Ok = $false; Text = $null } }
+            $o = gx status -Json | ConvertFrom-Json
+            $o.Ok | Should -BeTrue
+        }
+        It '-Json skips jq invocation when it is unavailable' {
+            New-Linked 'sc-no-jq' | Out-Null
+            Mock _GxFindJq { $null }
+            Mock _GxInvokeJq { throw 'must not run' }
+            $o = gx status -Json | ConvertFrom-Json
+            $o.Ok | Should -BeTrue
+            Should -Invoke _GxInvokeJq -Exactly 0
+        }
+        It 'keeps missing values plain in rows and highlights them for the host' {
+            $script:GxRows = [System.Collections.Generic.List[object]]::new()
+            $script:GxQuiet = $false
+            $script:GxOk = $true
+            $script:GxColorOn = $true
+            try {
+                $hostText = ((& { _GxRow 'warn' 'auth' 'env ($TOKEN) NOT SET in this session' } 6>&1) | ForEach-Object { $_.MessageData.ToString() }) -join "`n"
+                $hostText | Should -Match "$([char]27)\[38;5;$($script:GxConfig.Palette.warn)mNOT SET$([char]27)\[0m"
+                $script:GxRows[0].Value | Should -Be 'env ($TOKEN) NOT SET in this session'
+                $script:GxRows[0].Value | Should -Not -Match "$([char]27)\["
+            } finally {
+                $script:GxColorOn = $false
+                $script:GxQuiet = $false
+            }
         }
         It '-Json is refused for log and diff' {
             New-Linked 'sc4' | Out-Null
@@ -1374,6 +1560,7 @@ Describe 'gx' {
             New-Linked 'tc2' | Out-Null
             git branch -q feat/completion
             (_GxCompleteBranches 'feat/c' | ForEach-Object CompletionText) | Should -Contain 'feat/completion'
+            (TabExpansion2 -inputScript 'gx rebase feat/c' -cursorColumn 16).CompletionMatches.CompletionText | Should -Contain 'feat/completion'
         }
         It 'completes the mode through the registered completer' {
             $c = TabExpansion2 -inputScript 'gx sw' -cursorColumn 5
@@ -2171,6 +2358,76 @@ Complete-Line './gx.ps1 setup -TokenStorage '
 
     # =====================================================================================
     Describe 'branch and switch edge cases' {
+        It 'builds picker choices from local and remote-only branches' {
+            New-Linked 'sw-choices' | Out-Null
+            git branch feat/local
+            git branch feat/remote
+            git push -q origin feat/remote 2>&1 | Out-Null
+            git branch -D feat/remote 2>&1 | Out-Null
+            $choices = @(_GxSwitchChoices 'origin')
+            ($choices | Where-Object Target -eq 'main').Current | Should -BeTrue
+            ($choices | Where-Object Target -eq 'feat/local').Scope | Should -Be 'local'
+            ($choices | Where-Object Target -eq 'feat/remote').Scope | Should -Be 'remote'
+        }
+
+        It 'navigates and filters the dependency-free picker' {
+            $choices = @(
+                [pscustomobject]@{ Target = 'main'; Scope = 'local'; Current = $true; Subject = 'main branch' },
+                [pscustomobject]@{ Target = 'feat/cache'; Scope = 'local'; Current = $false; Subject = 'cache work' }
+            )
+            $script:PickerKeys = [System.Collections.Generic.Queue[object]]::new()
+            $script:PickerKeys.Enqueue([pscustomobject]@{ Key = 'F'; KeyChar = [char]'f' })
+            $script:PickerKeys.Enqueue([pscustomobject]@{ Key = 'Enter'; KeyChar = [char]0 })
+            Mock _GxReadPickerKey { $script:PickerKeys.Dequeue() }
+            Mock _GxRenderBranchPicker { 3 }
+            Mock _GxClearBranchPicker {}
+            _GxSelectBranch $choices | Should -Be 'feat/cache'
+            Should -Invoke _GxRenderBranchPicker -Times 2 -Exactly
+        }
+
+        It 'uses the picker when no branch is supplied in an interactive terminal' {
+            New-Linked 'sw-picker' | Out-Null
+            git branch feat/picked
+            Mock _GxCanPrompt { $true }
+            Mock _GxSwitchChoices { @([pscustomobject]@{ Target = 'feat/picked'; Scope = 'local'; Current = $false; Subject = '' }) }
+            Mock _GxSelectBranch { 'feat/picked' }
+            gx switch | Out-Null
+            $LASTEXITCODE | Should -Be 0
+            (git branch --show-current) | Should -Be 'feat/picked'
+            Should -Invoke _GxSelectBranch -Exactly 1
+        }
+
+        It 'treats picker cancellation as a successful no-op' {
+            New-Linked 'sw-cancel' | Out-Null
+            Mock _GxCanPrompt { $true }
+            Mock _GxSwitchChoices { @([pscustomobject]@{ Target = 'main'; Scope = 'local'; Current = $true; Subject = '' }) }
+            Mock _GxSelectBranch { $null }
+            $output = (& { gx switch } 6>&1 | Out-String)
+            $LASTEXITCODE | Should -Be 0
+            $output | Should -Match 'cancelled'
+            (git branch --show-current) | Should -Be 'main'
+        }
+
+        It 'preserves dry-run behavior after an interactive selection' {
+            New-Linked 'sw-dry-picker' | Out-Null
+            git branch feat/dry-picked
+            Mock _GxCanPrompt { $true }
+            Mock _GxSwitchChoices { @([pscustomobject]@{ Target = 'feat/dry-picked'; Scope = 'local'; Current = $false; Subject = '' }) }
+            Mock _GxSelectBranch { 'feat/dry-picked' }
+            $output = (& { gx switch -DryRun } 6>&1 | Out-String)
+            $LASTEXITCODE | Should -Be 0
+            $output | Should -Match 'switch feat/dry-picked'
+            (git branch --show-current) | Should -Be 'main'
+        }
+
+        It 'never prompts without a branch in scripted output modes' {
+            New-Linked 'sw-scripted' | Out-Null
+            Mock _GxSelectBranch { throw 'must not prompt' }
+            (gx switch -Quiet -PassThru).Ok | Should -BeFalse
+            (gx switch -Json | ConvertFrom-Json).Ok | Should -BeFalse
+            Should -Invoke _GxSelectBranch -Exactly 0
+        }
+
         It 'branch -All includes remote-tracking refs' {
             New-Linked 'ba-all' | Out-Null
             $r = gx branch -All -PassThru -Quiet
@@ -2207,6 +2464,28 @@ Complete-Line './gx.ps1 setup -TokenStorage '
             git tag v1
             (gx switch feat/based -Create -Base v1 -PassThru -Quiet).Ok | Should -BeTrue
             (git branch --show-current) | Should -Be 'feat/based'
+        }
+        It 'keeps git safety behavior when local changes would be overwritten' {
+            New-Linked 'sw-dirty' | Out-Null
+            git switch -q -c other
+            Set-Content readme.md 'other branch'; git commit -qam 'other change'
+            git switch -q main
+            Set-Content readme.md 'local uncommitted change'
+            $result = gx switch other -PassThru -Quiet
+            $result.Ok | Should -BeFalse
+            AnyText $result 'local changes would be overwritten' | Should -BeTrue
+            (git branch --show-current) | Should -Be 'main'
+        }
+        It 'keeps branch rows within a narrow terminal width' {
+            New-Linked 'ba-narrow' | Out-Null
+            git switch -q -c 'feature/a-very-long-branch-name-for-layout-testing'
+            Add-Commit 'long.txt' '1' 'feat: a deliberately long subject for terminal width testing'
+            Mock _GxTerminalWidth { 60 }
+            $output = @(& { gx branch } 6>&1 | ForEach-Object { $_.MessageData.ToString() })
+            $branchLine = $output | Where-Object { $_ -match '^\s{2}\* feature/' } | Select-Object -First 1
+            $branchLine | Should -Not -BeNullOrEmpty
+            (Get-ClapVisibleLength $branchLine) | Should -BeLessOrEqual 60
+            $branchLine | Should -Match '~'
         }
     }
 

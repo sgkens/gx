@@ -22,6 +22,7 @@
         - [`gx sync`](#gx-sync)
         - [`gx branch`](#gx-branch)
         - [`gx switch`](#gx-switch)
+        - [`gx rebase`](#gx-rebase)
         - [`gx undo`](#gx-undo)
         - [`gx tag`](#gx-tag)
         - [`gx log`](#gx-log)
@@ -64,7 +65,7 @@
 - **Tokens stay in environment variables by default.** A host-scoped credential helper reads them at push/pull time; plaintext URL storage requires explicit opt-in.
 - **Safe by default.** Fast-forward-only pulls, `--force-with-lease` (never bare `--force`), a secrets/size guard on
   every commit, protected default branch, `-DryRun` on anything that changes state.
-- **Scriptable.** Every mode sets `$LASTEXITCODE` and can return an object (`-PassThru`) or JSON (`-Json`).
+- **Scriptable.** Every mode sets `$LASTEXITCODE` and can return an object (`-PassThru`) or JSON (`-Json`). If `jq` is available, gx uses it to validate and format JSON; otherwise it returns PowerShell's JSON unchanged.
 - **Direct script or module.** Run/dot-source `gx.ps1`, or import `gx.psd1` to expose only the public `gx` command. PowerShell 7.3+, git 2.28+ recommended.
 
 ```
@@ -82,7 +83,7 @@
 ```
 ❯ ./gx help || im gx; gx help || iex https://raw.githubusercontent.com/sgkens/gx/main/gx.ps1 help;
 
-  ▄▀▀▀█ ▀▄ ▄▀     gx v1.0.0
+  ▄▀▀▀█ ▀▄ ▄▀     Git Executor (GX) v0.0.0 prerelease
   █   █  ▄▀▄  ▄▄  personal git QOL
    ▀▀▀█ ▀   ▀ ▀▀  git-only | no API calls | PowerShell 7.3+
    ▀▀▀            config: /home/sgkens/.gx.json  (none)
@@ -90,40 +91,63 @@
  usage   gx [mode] [words...] [options]     gx <mode> -Help  |  gx help <mode>
          quote a message that contains  # ; | & > < $  or a word starting with -   (PowerShell would eat it)
 
- everyday
+ ░░░▌ Everyday ░
    status   branch, ahead/behind, changes, stash, in-progress state, remotes and auth
+             params  -Detail
    commit   git commit -m with a conventional prefix, a staged summary and a secrets guard
+             params  -Type -Scope -Body -Add -AddAll -Tracked -Amend -Push -Force -NoVerify -Signoff -NoGuard
    push     push with a commit preview; sets the upstream on a new branch
+             params  -Mr -CiSkip -Open -Tags -Force -Remote
    pull     fast-forward only by default; says what to do when the branches diverged
+             params  -Rebase -Merge -Autostash
    sync     fetch --prune, fast-forward if that is safe, report where you stand
+             params  -All -Push -Rebase -Merge
    branch   list branches with tracking state; clean up merged or gone ones
-   switch   switch branches, tracking a remote branch or creating a new one
+             params  -All -Clean -Delete -Force
+   switch   pick or switch branches, tracking a remote branch or creating a new one
+             params  -Create -Base
    undo     soft-undo the last commit(s): changes stay staged
+             params  -Count -Force
    tag      list tags and unreleased commits, create annotated tags, bump semver
+             params  -Bump -Message -Lightweight -Base -Push -Force -Count
    log      graph log in the same palette; Compact or Full metadata
+             params  -Detail -All -Branch -Count -Author -Me -Grep -Since -Until -Merges -NoMerges -Stat -NoPager
    diff     working tree, staged, branch-vs-main or ref-vs-ref, with moved-line colouring
+             params  -Staged -Main -Base -To -Stat -NameOnly -Word -NoPager
    open     open the repo, merge requests, issues, pipelines, a branch, a file... in the browser
+             params  -Print -Remote -OriginType
 
- repo setup
+ ░░░▌ Repo Setup ░
    setup    origin (or another remote), push url and the env-reading credential helper
+             params  -OriginType -Server -Name -Namespace -User -Remote -TokenVar -TokenStorage -PushUrl -Push -Force
    init     git init, scaffolds, optional first commit, then setup
+             params  -Message -Push -Gitignore -NoIgnore -Readme -License -Branch
    clone    clone with the env token, then run setup and cd into it
+             params  -Dir -NoCd -Server -OriginType -TokenVar
    mirror   add or refresh a separate "mirror" remote and optionally push to it
+             params  -Push -All -MirrorRefs
    ignore   .gitignore templates, added idempotently
+             params  -List
    config   show the effective configuration, or write an example config file
+             params  -Create
 
- diagnose
+ ░░░▌ Diagnose ░
    check    does the token work, and does the repo exist? (git ls-remote, no API)
+             params  -Remote
    doctor   versions, identity, credential helpers, token variables and a real credential test
+             params  -Fix -Force
    sweep    one table for many repos; finds and migrates plaintext tokens
+             params  -Depth -Detail -Fix -TokenVar -Force
+   semver   next SemVer calculated from Conventional Commits in Git history
+             params  -MinorTypes -PatchTypes
 
- everywhere
+ ░░░▌ Everywhere ░
    -DryRun    print the git commands that would change something instead of running them
    -Force     override a safety stop (the specific meaning is listed per mode)
    -Quiet     no output (the exit code and -PassThru still work)
    -CommandTrace show every git command the action runs, with exit code and timing (also in -PassThru Data.trace)
    -PassThru  also return a result object: Mode, Ok, ExitCode, Rows, Data
-   -Json      print that result as JSON (implies -Quiet; not for log/diff)
+   -Json      print JSON, formatted through jq when available (implies -Quiet; not for log/diff)
    -Help      this screen, or gx <mode> -Help for one mode
 
  env   GITLAB_API_KEY  GITHUB_API_KEY  GITEA_API_KEY  GX_USER  GX_NAMESPACE  GX_CONFIG  GX_TRACE_LOG  NO_COLOR
@@ -215,7 +239,7 @@ Every mode also accepts the common options:
 | `-Quiet`        | no output (the exit code and `-PassThru` still work)                                                                                      |
 | `-CommandTrace` | show every git command the action runs, with exit code and timing (also in `-PassThru` `Data.trace`); see [Command trace](#command-trace) |
 | `-PassThru`     | also return a result object: Mode, Ok, ExitCode, Rows, Data                                                                               |
-| `-Json`         | print that result as JSON (implies `-Quiet`; not for log/diff)                                                                            |
+| `-Json`         | print JSON, formatted through `jq` when available (implies `-Quiet`; not for log/diff)                                                    |
 | `-Help`         | the overview, or `gx <mode> -Help` for one mode                                                                                           |
 
 > **Quoting:** words after the mode are the message/paths, so `gx commit fix the bug` needs no quotes. Quote a message
@@ -367,11 +391,14 @@ gx branch -Delete wip/x -Force
 
 #### `gx switch`
 
-Switch branches, tracking a remote branch or creating a new one.
+Pick from local and remote branches, switch directly by name, or create a new branch.
 
 ```powershell
+gx switch
 gx switch <branch> [-Create [-Base <ref>]]
 ```
+
+With no branch argument, an interactive terminal opens the dependency-free selector. Type to filter, use Up/Down to move, Enter to switch, or Escape to cancel. Scripts, CI, redirected output, `-Quiet`, `-PassThru`, and `-Json` never prompt and must provide a branch name.
 
 | Option      |                                      |
 | ----------- | ------------------------------------ |
@@ -379,10 +406,36 @@ gx switch <branch> [-Create [-Base <ref>]]
 | `-Base ref` | start point for -Create              |
 
 ```powershell
+gx switch
 gx switch main
 gx switch feat/cache -Create
 gx switch hotfix -Create -Base v1.2.0
 ```
+
+#### `gx rebase`
+
+Replay the current branch onto the repository default branch or an explicit base, with guided conflict recovery.
+
+```powershell
+gx rebase [base] [-Autostash] [-Interactive] [-UpdateRefs]
+gx rebase -Continue | -Abort | -Skip
+```
+
+| Option                         |                                                               |
+| ------------------------------ | ------------------------------------------------------------- |
+| `-Autostash`                   | stash tracked changes around the rebase and restore them      |
+| `-Interactive`                 | open Git's native rebase todo editor on an interactive terminal |
+| `-UpdateRefs`                  | move other local refs that point into rewritten commits       |
+| `-Continue`, `-Skip`, `-Abort` | continue after resolving, omit the current commit, or restore |
+
+```powershell
+gx rebase
+gx rebase origin/main -Autostash
+gx rebase -Interactive main
+gx rebase -Continue
+```
+
+Conflicts list each affected file and the exact continue, skip, and abort commands. Interactive rebases require a real terminal. For scripted `-Continue`, explicitly set `GIT_EDITOR` to a non-interactive command.
 
 #### `gx undo`
 
@@ -937,12 +990,12 @@ Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser    # once
 Invoke-Pester ./tests -Output Detailed
 ```
 
-326 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
+351 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
 repositories standing in for GitLab/GitHub through `url.<path>.insteadOf`, and fake tokens. **No network, and your real git
 config and `~/.gx.json` are never read or written.** Coverage: URL parsing, masking, error translation, config loading,
 the credential helper (a real `git credential fill`, with the variable set and unset), `setup` (idempotence, migration,
 storage modes, injection validation, second remotes, identity), `init` scaffolds, `ignore`, `commit` and every guard rule,
-`status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`undo`, `tag` (bump, push, delete),
+`status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`rebase`/`undo`, `tag` (bump, push, delete),
 `open` URL building per provider, `sweep` including `-Fix`, `log`/`diff`, `clone`/`mirror`, `check`/`doctor`, the help system
 (every mode documented, colour on and off), the scripting surface, running the file directly (argument forwarding, exit codes), command tracing (masking, log file, reset), and parameter completion.
 

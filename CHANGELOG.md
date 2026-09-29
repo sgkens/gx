@@ -2,6 +2,12 @@
 
 All notable changes to `gx` are recorded in this file.
 
+## Unreleased
+
+### Added
+
+- Safe standalone `gx rebase [base]` workflows with default-branch resolution, autostash, interactive todo editing, ref updates, dry-run previews, structured output, and guided continue/skip/abort conflict recovery.
+
 ## 0.1.0
 
 ### Added
