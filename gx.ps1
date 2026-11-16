@@ -66,6 +66,7 @@ function _GxDefaultConfig {
     Roots    = @()               # default folders for gx sweep
     TraceLog = $null             # file that -CommandTrace appends to (also $env:GX_TRACE_LOG)
     Gitignore = @{ Default = @('secrets', 'os', 'editor'); Templates = @{} }
+    TokenHelperShell = 'PowerShell' # PowerShell (pwsh) | Sh; both read process environment variables
     LogCount = 25                # default -Count for Log (0 = unlimited)
     Palette  = @{ label = 39; ok = 114; warn = 214; err = 203; dim = 244; hash = 214; mode = 141 }
     CommitTypes = @('feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'build', 'ci', 'chore', 'revert', 'wip', 'deps', 'release')
@@ -93,7 +94,7 @@ function _GxDefaultConfig {
     }
     Providers = @{
         gitlab = @{ Server = 'gitlab.com'; TokenVar = 'GITLAB_API_KEY' }
-        github = @{ Server = 'github.com'; TokenVar = 'GITHUB_API_KEY' }
+        github = @{ Server = 'github.com'; TokenVar = 'GITHUB_API_KEY_FGAT_SGKENS' }
         gitea  = @{ Server = $null;        TokenVar = 'GITEA_API_KEY'  }   # pass -Server
         custom = @{ Server = $null;        TokenVar = $null            }   # pass -Server and -TokenVar
     }
@@ -1545,16 +1546,16 @@ function _GxTokenGate {
     $need = $Storage -in 'Env', 'Url'
     if ($need -and -not $tok) {
         if ($script:GxDry) {
-            _GxRow 'warn' 'token' ('$' + $TokenVar + ' is not set (continuing: dry run)')
+            _GxRow 'warn' 'token' ('$env:' + $TokenVar + ' is not set (continuing: dry run)')
             return [pscustomobject]@{ Ok = $true; Tok = $null }
         }
-        _GxRow 'fail' 'token' ('$' + $TokenVar + ' is not set in this session - set it, or use -TokenStorage Manager')
+        _GxRow 'fail' 'token' ('$env:' + $TokenVar + ' is not set in this session - assign $env:' + $TokenVar + ' in PowerShell, or use -TokenStorage Manager')
         return [pscustomobject]@{ Ok = $false; Tok = $null }
     }
     if ($need) {
         $script:GxSecrets += $tok
         $script:GxSecrets += [uri]::EscapeDataString($tok)
-        _GxRow 'ok' 'token' ('$' + $TokenVar + ' is set')
+        _GxRow 'ok' 'token' ('$env:' + $TokenVar + ' is set')
     }
     return [pscustomobject]@{ Ok = $true; Tok = $tok }
 }
@@ -1568,7 +1569,7 @@ function _GxSetHelper {
         $g1 = _GxGit @('config', '--local', '--add', $key, '') -Mutating     # empty entry resets inherited helpers (e.g. GCM)
         $g2 = _GxGit @('config', '--local', '--add', $key, (_GxHelperCmd $User $TokenVar)) -Mutating
         if (-not ($g1.Ok -and $g2.Ok)) { _GxRow 'fail' 'helper' ($g1.Text + $g2.Text); return $false }
-        _GxRow 'ok' 'helper' ('env: $' + $TokenVar + '  (user ' + $User + ', host ' + $Server + ')')
+        _GxRow 'ok' 'helper' ('env: $env:' + $TokenVar + '  (user ' + $User + ', host ' + $Server + ')')
     } elseif ($Storage -eq 'Manager') {
         _GxRow 'ok' 'helper' 'local helper removed - global credential manager applies'
     }
@@ -1905,18 +1906,28 @@ function _GxHelperVar {
     if (-not $Server) { return $null }
     $h = _GxGit @('config', '--local', '--get-all', "credential.https://$Server.helper")
     if ($h.Ok) {
-        $m = [regex]::Match($h.Text, 'password=\$(?<v>[A-Za-z_][A-Za-z0-9_]*)')
+        $m = [regex]::Match($h.Text, '(?:gx-token-var=|password=\$)(?<v>[A-Za-z_][A-Za-z0-9_]*)')
         if ($m.Success) { return $m.Groups['v'].Value }
     }
     return $null
 }
 
 function _GxHelperCmd {
-    # Runs under git's sh. Unquoted on purpose (no embedded double quotes to escape).
-    # If the env var is unset it prints a hint to stderr and returns NO credentials (instead of an empty password).
+    # Git launches ! helpers through sh on every platform. Only the action gate runs
+    # there by default; pwsh reads the inherited environment without loading profiles.
     param([string]$User, [string]$TokenVar)
-    return '!f() { test $1 = get || exit 0; test ${' + $TokenVar + ':+x} || { echo gx: ' + $TokenVar +
-           ' is not set >&2; exit 0; }; echo username=' + $User + '; echo password=$' + $TokenVar + '; }; f'
+    if ($script:GxConfig.TokenHelperShell -eq 'Sh') {
+        return '!f() { test "$1" = get || return 0; test "${' + $TokenVar + ':+x}" || { printf "%s\n" "gx: environment variable ' + $TokenVar +
+               ' is not set (export it before starting pwsh)" >&2; return 0; }; printf "%s\n" "username=' + $User + '" "password=$' + $TokenVar + '"; : gx-token-var=' + $TokenVar + '; }; f'
+    }
+    # Encode code only, never the token. This avoids shell expansion of PowerShell
+    # syntax and preserves punctuation/whitespace in credentials on Windows and Unix.
+    $code = '$token = [Environment]::GetEnvironmentVariable("' + $TokenVar + '"); ' +
+            'if ([string]::IsNullOrEmpty($token)) { [Console]::Error.WriteLine(''gx: $env:' + $TokenVar +
+            ' is not set; set it in the calling PowerShell session''); exit 0 }; ' +
+            '[Console]::WriteLine("username=' + $User + '"); [Console]::WriteLine("password=" + $token)'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    return '!f() { test "$1" = get || return 0; pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded + '; : gx-token-var=' + $TokenVar + '; }; f'
 }
 
 function _GxAuthInfo {
@@ -1926,8 +1937,8 @@ function _GxAuthInfo {
     if ($P.HasToken) { return @('warn', 'PLAINTEXT token in URL  (gx setup migrates it to Env)') }
     $v = _GxHelperVar $P.Server
     if ($v) {
-        if ([Environment]::GetEnvironmentVariable($v)) { return @('ok', ('env ($' + $v + ') set')) }
-        return @('warn', ('env ($' + $v + ') NOT SET in this session'))
+        if ([Environment]::GetEnvironmentVariable($v)) { return @('ok', ('env ($env:' + $v + ') set')) }
+        return @('warn', ('env ($env:' + $v + ') NOT SET in this session'))
     }
     return @('info', 'no local helper (global/system helper or prompt)')
 }
@@ -1947,7 +1958,7 @@ function _GxRemoteCtx {
 function _GxExplainGit {
     # Turn common git/http failures into one readable line. $Op: push | clone | fetch | check
     param([string]$Text, [string]$Type, [string]$TokenVar, [string]$Ns, [string]$Op = 'push')
-    $tv = '$' + $TokenVar
+    $tv = '$env:' + $TokenVar
     if ($Text -match '(?i)authentication failed|invalid credentials|could not read (username|password)|http basic: access denied|error: 401') {
         return "authentication failed - check $tv is set in this shell, unexpired, and has the right scope"
     }
@@ -2188,7 +2199,7 @@ function _GxCommit {
         _GxRow 'info' 'guard' 'skipped in dry run (nothing is staged yet)'
     } else {
         $hv = _GxGit @('config', '--local', '--get-regexp', '^credential\..*\.helper$')
-        foreach ($m in [regex]::Matches($hv.Text, 'password=\$([A-Za-z_][A-Za-z0-9_]*)')) {
+        foreach ($m in [regex]::Matches($hv.Text, '(?:gx-token-var=|password=\$)([A-Za-z_][A-Za-z0-9_]*)')) {
             $val = [Environment]::GetEnvironmentVariable($m.Groups[1].Value)
             if ($val) { $script:GxSecrets += $val }
         }
@@ -2661,7 +2672,7 @@ function _GxCheck {
         if ($p -and $p.Scheme -ne 'ssh' -and -not $p.HasToken) {
             $v = _GxHelperVar $p.Server
             if ($v -and -not [Environment]::GetEnvironmentVariable($v)) {
-                _GxRow 'warn' $r ('$' + $v + ' is not set in this shell - the helper will supply no credentials')
+                _GxRow 'warn' $r ('$env:' + $v + ' is not set in this shell - the helper will supply no credentials')
             }
         }
         # never let a check hang on a prompt or pop a credential UI
@@ -2744,7 +2755,7 @@ function _GxDoctor {
     $vars = @($script:GxConfig.Providers.Values | ForEach-Object { $_.TokenVar } | Where-Object { $_ } | Select-Object -Unique)
     foreach ($tv in $vars) {
         $val = [Environment]::GetEnvironmentVariable($tv)
-        if ($val) { _GxRow 'ok' ('$' + $tv) "set ($($val.Length) chars)" } else { _GxRow 'info' ('$' + $tv) 'not set' }
+        if ($val) { _GxRow 'ok' ('$env:' + $tv) "set ($($val.Length) chars)" } else { _GxRow 'info' ('$env:' + $tv) 'not set' }
     }
 
     # this repo
@@ -2759,7 +2770,7 @@ function _GxDoctor {
             $tv = _GxHelperVar $p.Server
             if ($tv) {
                 $hcfg = (_GxGit @('config', '--local', '--get-all', "credential.https://$($p.Server).helper")).Text
-                if ($hcfg -notmatch ':\+x') { _GxRow 'warn' "  helper $r" 'older helper format (sends an empty password when the var is unset) - re-run gx setup to refresh' }
+                if ($hcfg -notmatch 'gx-token-var=|:\+x') { _GxRow 'warn' "  helper $r" 'older helper format (sends an empty password when the var is unset) - re-run gx setup to refresh' }
                 if ([Environment]::GetEnvironmentVariable($tv)) {
                     $save = @{ P = $env:GIT_TERMINAL_PROMPT; G = $env:GCM_INTERACTIVE }
                     $env:GIT_TERMINAL_PROMPT = '0'; $env:GCM_INTERACTIVE = 'never'
@@ -3049,13 +3060,17 @@ function _GxLoadConfig {
     if ($j -isnot [hashtable]) { $st.Error = 'top level must be a JSON object'; Write-Warning "gx: ignoring $path - $($st.Error)"; return }
 
     $known = 'user', 'namespace', 'branch', 'logCount', 'commitTypes', 'commitTypesAdd', 'palette', 'providers', 'hosts',
-             'identity', 'identities', 'guard', 'recommended', 'roots', 'gitignore', 'traceLog'
+             'identity', 'identities', 'guard', 'recommended', 'roots', 'gitignore', 'traceLog', 'tokenHelperShell'
     $st.Unknown = @($j.Keys | Where-Object { $known -notcontains $_ })
 
     if ($j.user)      { $c.User = "$($j.user)" }
     if ($j.namespace) { $c.Namespace = "$($j.namespace)" }
     if ($j.branch)    { $c.Branch = "$($j.branch)" }
     if ($null -ne $j.logCount) { $c.LogCount = [int]$j.logCount }
+    if ($j.ContainsKey('tokenHelperShell')) {
+        if ($j.tokenHelperShell -in 'PowerShell', 'Sh') { $c.TokenHelperShell = [string]$j.tokenHelperShell }
+        else { $st.Notes += 'tokenHelperShell must be PowerShell or Sh; using PowerShell' }
+    }
     if ($j.commitTypes)    { $c.CommitTypes = @($j.commitTypes | ForEach-Object { "$_" }) }
     if ($j.commitTypesAdd) { $c.CommitTypes = @(@($c.CommitTypes) + @($j.commitTypesAdd | ForEach-Object { "$_" }) | Select-Object -Unique) }
     if ($j.palette -is [hashtable]) {
@@ -3109,6 +3124,7 @@ $script:GxConfigExample = @'
   "namespace": "sgkens",
   "branch": "main",
   "logCount": 25,
+  "tokenHelperShell": "PowerShell",
 
   "identity": { "name": "Your Name", "email": "you@example.com" },
   "identities": {
@@ -3591,11 +3607,11 @@ function _GxMigrateRemote {
         if ($bad) { _GxRow 'warn' $label "$($bad[0]): $($bad[1])"; return 'skipped' }
         $envVal = [Environment]::GetEnvironmentVariable($tokenVar)
         if (-not $envVal) {
-            _GxRow 'warn' $label ('$' + $tokenVar + ' is not set - left as is so it keeps working (set it, then re-run)')
+            _GxRow 'warn' $label ('$env:' + $tokenVar + ' is not set - left as is so it keeps working (set it, then re-run)')
             return 'skipped'
         }
         if ($p.Token -and $p.Token -ne $envVal -and -not $o.Force) {
-            _GxRow 'warn' $label ('embedded token differs from $' + $tokenVar + ' - after migration this repo would use $' + $tokenVar + '; -Force to proceed')
+            _GxRow 'warn' $label ('embedded token differs from $env:' + $tokenVar + ' - after migration this repo would use $env:' + $tokenVar + '; -Force to proceed')
             return 'skipped'
         }
         $g = _GxGit @('remote', 'set-url', $Remote, $p.Clean) -Mutating
@@ -3608,7 +3624,7 @@ function _GxMigrateRemote {
             [void](_GxGit @('config', '--local', '--unset-all', "remote.$Remote.pushurl") -Mutating)
             foreach ($x in $pu.Lines) { $px = _GxParseUrl $x; [void](_GxGit @('config', '--local', '--add', "remote.$Remote.pushurl", $(if ($px) { $px.Clean } else { $x })) -Mutating) }
         }
-        _GxRow $(if ($script:GxDry) { 'info' } else { 'ok' }) $(if ($script:GxDry) { 'would migrate' } else { 'migrated' }) ($label + ':  token removed from the URL, helper reads $' + $tokenVar)
+        _GxRow $(if ($script:GxDry) { 'info' } else { 'ok' }) $(if ($script:GxDry) { 'would migrate' } else { 'migrated' }) ($label + ':  token removed from the URL, helper reads $env:' + $tokenVar)
         return 'migrated'
     } finally { $script:GxDir = $null }
 }
@@ -3715,10 +3731,11 @@ function _GxConfigMode {
     $gd = if ($c.Guard.Enabled) { 'on' } else { 'OFF' }
     _GxRow 'info' 'guard' (New-kvstring "$gd   {confval:kv:maxFile=$($c.Guard.MaxFileMB)MB}   {prop:kv:patterns=$($c.Guard.NamePatterns.Count) name, $($c.Guard.ContentPatterns.Count) content}   {prop:kv:allowed=$(@($c.Guard.AllowPaths).Count)}")
     if ($c.Roots.Count) { _GxRow 'info' 'roots' ($c.Roots -join ', ') }
+    _GxRow 'info' 'token helper' $c.TokenHelperShell
     _GxRow 'info' 'trace log' $(if (_GxTraceLogPath) { "$(_GxTraceLogPath)  (used by -CommandTrace)" } else { 'none  (set "traceLog" or $env:GX_TRACE_LOG to keep a file of every -CommandTrace run)' })
     _GxRow 'info' 'commit types' ($c.CommitTypes -join ', ')
     _GxRow 'info' 'init ignore' ($c.Gitignore.Default -join ', ')
-    $script:GxData['config'] = @{ Path = $script:GxConfigPath; Loaded = $st.Loaded; Error = $st.Error; Unknown = $st.Unknown; User = $c.User; Branch = $c.Branch; Hosts = $c.Hosts; Roots = $c.Roots }
+    $script:GxData['config'] = @{ Path = $script:GxConfigPath; Loaded = $st.Loaded; Error = $st.Error; Unknown = $st.Unknown; User = $c.User; Branch = $c.Branch; Hosts = $c.Hosts; Roots = $c.Roots; TokenHelperShell = $c.TokenHelperShell }
 }
 
 # =====================================================================

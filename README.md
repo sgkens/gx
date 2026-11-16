@@ -793,17 +793,36 @@ What `gx setup` does instead (`-TokenStorage Env`, the default):
 $ git config --local --get-regexp 'credential|remote.origin.url'
 remote.origin.url https://gitlab.com/sgkens/demo.git
 credential.https://gitlab.com.helper                                   <- empty entry: reset the helper chain for this host
-credential.https://gitlab.com.helper !f() { test $1 = get || exit 0; test ${GITLAB_API_KEY:+x} || { echo gx: GITLAB_API_KEY is not set >&2; exit 0; }; echo username=sgkens; echo password=$GITLAB_API_KEY; }; f
+credential.https://gitlab.com.helper !f() { test "$1" = get || return 0; pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand <encoded-reader>; : gx-token-var=GITLAB_API_KEY; }; f
 ```
 
 - The remote URL is clean.
 - The helper is **scoped to the host** and lives in the repo's local config, so it never overrides your global
   credential manager for other hosts.
-- The token is read from `$GITLAB_API_KEY` **when git asks for it**. The value is not stored anywhere. Rotate the
+- The token is read from `$env:GITLAB_API_KEY` **when git asks for it**. The value is not stored anywhere. Rotate the
   variable and every repo follows.
 - If the variable is unset the helper prints a one-line reason and returns _nothing_ (instead of sending an empty
   password), so git fails with a clear message rather than a confusing 401.
 - Values that end up inside the shell helper (host, user, variable name) are validated against injection.
+
+The default `tokenHelperShell` is `PowerShell`: Git launches `pwsh` without profiles to read the inherited process
+environment. The encoded command contains reader code and variable names only. It contains no token.
+Set `"tokenHelperShell": "Sh"` in `~/.gx.json` to use a POSIX shell reader instead. Both readers use the same environment
+on Windows and Linux; neither reads ordinary PowerShell variables such as `$GITHUB_API_KEY` or unexported Bash variables.
+Re-run `gx setup` in each existing repo after changing the setting to replace its installed helper.
+
+In the PowerShell session that runs `gx`, set the token before setup or push:
+
+```powershell
+# PowerShell on Windows or Linux; substitute your token locally.
+$env:GITHUB_API_KEY = '<your-token>'
+gx setup
+gx push
+```
+
+When launching PowerShell from Bash, use `export GITHUB_API_KEY=...` before starting `pwsh`. An existing PowerShell
+process does not pick up environment changes made later in another terminal. Use `gx doctor` to check presence and
+credential resolution without printing the token. Normal `$GITHUB_API_KEY = ...` assignments do not set the environment.
 
 | `-TokenStorage` | URL in `.git/config`              | Use when                                                    |
 | --------------- | --------------------------------- | ----------------------------------------------------------- |
@@ -877,6 +896,7 @@ keys and bad patterns, `gx doctor` reports an unreadable file. A broken file is 
 | Key                                       | Meaning                                                                                                                        |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `user`, `namespace`, `branch`, `logCount` | your account, default namespace for bare repo names, initial/default branch, log length                                        |
+| `tokenHelperShell`                        | `PowerShell` (default, requires `pwsh` on PATH) or `Sh`; re-run `gx setup` to refresh existing helpers |
 | `providers`                               | `gitlab`/`github`/`gitea` -> `server`, `tokenVar` (the built-in providers only)                                                |
 | `hosts`                                   | map a self-hosted host to a provider, e.g. `"git.corp.example": "gitlab"` (used for token variable, error hints and `gx open`) |
 | `identity`, `identities`                  | `name`/`email` written to a repo's _local_ config on setup/clone/init **only if it has none**; `identities` is per host        |

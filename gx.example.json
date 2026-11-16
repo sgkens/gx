@@ -3,6 +3,7 @@
   "namespace": "sgkens",
   "branch": "main",
   "logCount": 25,
+  "tokenHelperShell": "PowerShell",
 
   "identity": { "name": "Your Name", "email": "you@example.com" },
   "identities": {

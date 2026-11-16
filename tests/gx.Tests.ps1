@@ -178,6 +178,14 @@ Describe 'gx' {
             $script:GxConfig.CommitTypes | Should -Contain 'hotfix'
             $script:GxConfig.CommitTypes | Should -Contain 'feat'
         }
+        It 'accepts a sh helper preference and rejects invalid settings' {
+            Write-GxConfig @{ tokenHelperShell = 'Sh' }
+            $script:GxConfig.TokenHelperShell | Should -Be 'Sh'
+            $script:GxConfigState.Unknown | Should -BeNullOrEmpty
+            Write-GxConfig @{ tokenHelperShell = 'bash' }
+            $script:GxConfig.TokenHelperShell | Should -Be 'PowerShell'
+            $script:GxConfigState.Notes -join ' ' | Should -Match 'tokenHelperShell'
+        }
         It 'maps self-hosted hosts to a provider type' {
             Write-GxConfig @{ hosts = @{ 'git.corp.example' = 'gitlab'; 'code.example' = 'gitea' } }
             _GxInferType 'git.corp.example' 'custom' | Should -Be 'gitlab'
@@ -237,12 +245,79 @@ Describe 'gx' {
     }
 
     Describe 'Credential helper' {
-        It 'is unquoted and reads the variable at use time' {
+        AfterEach { Reset-GxConfig }
+
+        It 'defaults to pwsh without embedding the token' {
             $h = _GxHelperCmd 'sgkens' 'MY_TOKEN'
-            $h | Should -Not -Match '"'
-            $h | Should -Match 'password=\$MY_TOKEN'
-            $h | Should -Match ':\+x'
+            $h | Should -Match 'pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand'
+            $h | Should -Match 'gx-token-var=MY_TOKEN'
+            $h | Should -Not -Match ([regex]::Escape($script:Token))
         }
+
+        It 'preserves credentials and reads rotations with <Shell> helpers' -ForEach @(
+            @{ Shell = 'PowerShell' }; @{ Shell = 'Sh' }
+        ) {
+            Write-GxConfig @{ tokenHelperShell = $Shell }
+            New-TestRepo ('helper-' + $Shell) -Commit | Out-Null
+            $savedToken = $env:GITLAB_API_KEY
+            $savedPrompt = $env:GIT_TERMINAL_PROMPT
+            try {
+                $env:GITLAB_API_KEY = 'fake space * ? [abc] $value ; "quoted" \ slash'
+                (gx setup -Name helper -PassThru -Quiet).Ok | Should -BeTrue
+                _GxHelperVar 'gitlab.com' | Should -Be 'GITLAB_API_KEY'
+                $env:GIT_TERMINAL_PROMPT = '0'
+                foreach ($value in @($env:GITLAB_API_KEY, 'fake-rotated-token')) {
+                    $env:GITLAB_API_KEY = $value
+                    $out = @("protocol=https`nhost=gitlab.com`n`n" | git credential fill)
+                    $LASTEXITCODE | Should -Be 0
+                    $out | Should -Contain ('password=' + $value)
+                }
+                LocalCfg | Should -Not -Match 'fake-rotated-token'
+                $env:GITLAB_API_KEY = $null
+                $out = @("protocol=https`nhost=gitlab.com`n`n" | git credential fill 2>$null)
+                $out -join '|' | Should -Not -Match 'password='
+            } finally {
+                $env:GITLAB_API_KEY = $savedToken
+                $env:GIT_TERMINAL_PROMPT = $savedPrompt
+            }
+        }
+
+        It 'recognises and refreshes a legacy sh helper' {
+            New-TestRepo 'helper-legacy' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/sgkens/helper-legacy.git'
+            git config --local credential.https://gitlab.com.helper '!f() { echo username=sgkens; echo password=$GITLAB_API_KEY; }; f'
+            _GxHelperVar 'gitlab.com' | Should -Be 'GITLAB_API_KEY'
+            (gx setup -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get-all credential.https://gitlab.com.helper) -join ' ' | Should -Match 'pwsh'
+        }
+
+        It 'requires an environment variable rather than an ordinary PowerShell variable' {
+            New-TestRepo 'helper-env-only' -Commit | Out-Null
+            $savedToken = $env:GITLAB_API_KEY
+            $env:GITLAB_API_KEY = $null
+            $GITLAB_API_KEY = 'ordinary-variable-only'
+            try {
+                $r = gx setup -PassThru -Quiet
+                $r.Ok | Should -BeFalse
+                (Row $r 'token').Value | Should -Match '\$env:GITLAB_API_KEY'
+                git config --local --get remote.origin.url | Should -BeNullOrEmpty
+            } finally { $env:GITLAB_API_KEY = $savedToken }
+        }
+
+        It 'keeps custom helper tokens covered by the commit guard' {
+            New-TestRepo 'helper-custom-guard' -Commit | Out-Null
+            $savedToken = $env:GX_TEST_CUSTOM_TOKEN
+            $env:GX_TEST_CUSTOM_TOKEN = 'custom-secret-without-provider-prefix'
+            try {
+                (gx setup -TokenVar GX_TEST_CUSTOM_TOKEN -PassThru -Quiet).Ok | Should -BeTrue
+                Set-Content leaked.txt $env:GX_TEST_CUSTOM_TOKEN
+                $r = gx commit -Message 'test custom guard' -AddAll -PassThru -Quiet
+                $r.Ok | Should -BeFalse
+                HasRow $r 'guard' 'fail' | Should -BeTrue
+                $r.Rows.Value -join ' ' | Should -Not -Match $env:GX_TEST_CUSTOM_TOKEN
+            } finally { $env:GX_TEST_CUSTOM_TOKEN = $savedToken }
+        }
+
         It 'returns the token to git when the variable is set, and nothing when it is not' {
             $d = New-TestRepo 'helper1' -Commit
             gx setup -Name helper1 -Quiet
@@ -1247,7 +1322,7 @@ Describe 'gx' {
             $r = gx doctor -PassThru -Quiet
             $r.Ok | Should -BeTrue
             HasRow $r 'git' 'ok' | Should -BeTrue
-            (Row $r '$GITLAB_API_KEY').Value | Should -Match 'set \(\d+ chars\)'
+            (Row $r '$env:GITLAB_API_KEY').Value | Should -Match 'set \(\d+ chars\)'
             ($r.Rows.Value -join ' ') | Should -Not -Match ([regex]::Escape($script:Token))
         }
         It 'doctor -Fix sets only unset recommendations' {
