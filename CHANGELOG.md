@@ -4,6 +4,11 @@ All notable changes to `gx` are recorded in this file.
 
 ## Unreleased
 
+### Changed
+
+- Use pastel orange for tracked status paths and soft green for untracked paths, with matching commit summaries and separate status branch/commit accents.
+- Use soft cyan for log authors and muted teal for dates; expose the new accents through the shared palette.
+
 ### Added
 
 - Standalone `gx add` for positional paths, `-Add` arrays, `-All`/`-AddAll`, or tracked changes; shares staging with commit shortcuts and supports dry runs, tracing and JSON.

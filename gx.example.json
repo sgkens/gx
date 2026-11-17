@@ -2,6 +2,7 @@
   "user": "sgkens",
   "namespace": "sgkens",
   "branch": "main",
+  "originType": "gitlab",
   "logCount": 25,
   "tokenHelperShell": "PowerShell",
 
@@ -34,5 +35,5 @@
     "templates": { "terraform": [".terraform/", "*.tfstate", "*.tfstate.*"] }
   },
 
-  "palette": { "label": 39, "ok": 114, "warn": 214, "err": 203, "dim": 244 }
+  "palette": { "label": 39, "ok": 114, "warn": 214, "err": 203, "dim": 244, "subject": 252, "body": 250, "modified": 216, "untracked": 151, "author": 117, "date": 109 }
 }

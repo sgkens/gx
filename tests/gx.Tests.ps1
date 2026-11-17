@@ -32,6 +32,10 @@ Describe 'gx' {
         $env:NO_COLOR = '1'
 
         . $script:GxFile
+        # Keep tests independent of a customised provider variable in the main config.
+        $script:GithubTokenVar = $script:GxConfig.Providers.github.TokenVar
+        $script:Saved.GithubProviderToken = [Environment]::GetEnvironmentVariable($script:GithubTokenVar)
+        [Environment]::SetEnvironmentVariable($script:GithubTokenVar, $env:GITHUB_API_KEY)
 
         # ---- helpers -------------------------------------------------------------
         function New-Remote {
@@ -76,6 +80,7 @@ Describe 'gx' {
     }
 
     AfterAll {
+        [Environment]::SetEnvironmentVariable($script:GithubTokenVar, $script:Saved.GithubProviderToken)
         Set-Location $script:Saved.Loc
         $env:GIT_CONFIG_GLOBAL = $script:Saved.Global; $env:GITLAB_API_KEY = $script:Saved.Gitlab; $env:GITHUB_API_KEY = $script:Saved.Github
         $env:GITEA_API_KEY = $script:Saved.Gitea; $env:GX_CONFIG = $script:Saved.Cfg; $env:NO_COLOR = $script:Saved.NoColor
@@ -177,6 +182,38 @@ Describe 'gx' {
             $script:GxConfig.LogCount | Should -Be 7
             $script:GxConfig.CommitTypes | Should -Contain 'hotfix'
             $script:GxConfig.CommitTypes | Should -Contain 'feat'
+        }
+        It 'uses originType from the config for new remotes and accepts explicit overrides' {
+            Write-GxConfig @{ originType = 'github' }
+            $script:GxConfig.OriginType | Should -Be 'github'
+            New-TestRepo 'config-provider' -Commit | Out-Null
+            (gx setup -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://github.com/sgkens/config-provider.git'
+            New-TestRepo 'config-provider-override' -Commit | Out-Null
+            (gx setup -OriginType gitlab -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://gitlab.com/sgkens/config-provider-override.git'
+        }
+        It 'keeps the existing host when originType is only a default' {
+            Write-GxConfig @{ originType = 'github' }
+            New-TestRepo 'config-existing' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/sgkens/config-existing.git'
+            (gx setup -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://gitlab.com/sgkens/config-existing.git'
+        }
+        It 'reports invalid originType values and retains the default' {
+            Write-GxConfig @{ originType = 'invalid' }
+            $script:GxConfig.OriginType | Should -Be (_GxDefaultConfig).OriginType
+            $script:GxConfigState.Notes -join ' ' | Should -Match 'originType must be'
+        }
+        It 'reloads edited configuration in the existing session' {
+            Write-GxConfig @{ originType = 'gitlab'; logCount = 7 }
+            @{ originType = 'github'; logCount = 3 } | ConvertTo-Json | Set-Content -LiteralPath $env:GX_CONFIG
+            $script:GxConfig.OriginType | Should -Be 'gitlab'
+            $r = gx config -Reload -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Data.config.OriginType | Should -Be 'github'
+            $script:GxConfig.LogCount | Should -Be 3
+            $r.Data.config.Loaded | Should -BeTrue
         }
         It 'accepts a sh helper preference and rejects invalid settings' {
             Write-GxConfig @{ tokenHelperShell = 'Sh' }
@@ -342,6 +379,32 @@ Describe 'gx' {
             (git config --local --get remote.origin.url) | Should -Be 'https://gitlab.com/sgkens/s-clean.git'
             LocalCfg | Should -Not -Match ([regex]::Escape($script:Token))
             LocalCfg | Should -Match 'credential\.https://gitlab\.com\.helper=.*GITLAB_API_KEY'
+        }
+        It 'selects the explicit provider server and requires Force before changing hosts' {
+            New-TestRepo 'provider-switch' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/team/provider-switch.git'
+            $before = LocalCfg
+            $r = gx setup -OriginType github -TokenStorage Manager -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            (Row $r 'resolved').Value | Should -Match 'github.com'
+            LocalCfg | Should -Be $before
+            (gx setup -OriginType github -TokenStorage Manager -Force -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://github.com/team/provider-switch.git'
+        }
+        It 'infers the provider from an explicit Server before the existing host' {
+            New-TestRepo 'provider-server' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/team/provider-server.git'
+            (gx setup -Server github.com -TokenStorage Manager -Force -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://github.com/team/provider-server.git'
+        }
+        It 'preserves a self-hosted server when the explicitly selected provider matches' {
+            Write-GxConfig @{ hosts = @{ 'git.corp.example' = 'gitlab' } }
+            try {
+                New-TestRepo 'provider-selfhosted' -Commit | Out-Null
+                git remote add origin 'https://git.corp.example/team/tool.git'
+                (gx setup -OriginType gitlab -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+                (git config --local --get remote.origin.url) | Should -Be 'https://git.corp.example/team/tool.git'
+            } finally { Reset-GxConfig }
         }
         It 'is idempotent' {
             New-TestRepo 's-idem' -Commit | Out-Null
@@ -592,6 +655,103 @@ Describe 'gx' {
         }
     }
 
+    Describe 'standalone add' {
+        It 'stages a string array without making a commit or including other files' {
+            New-TestRepo 'add-array' -Commit | Out-Null
+            Set-Content one.txt 'one'
+            Set-Content 'two words.txt' 'two'
+            Set-Content other.txt 'other'
+            $head = git rev-parse HEAD
+            $r = gx add -Add @('one.txt', 'two words.txt') -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Mode | Should -Be 'Add'
+            @(git diff --cached --name-only) | Should -Be @('one.txt', 'two words.txt')
+            (git rev-parse HEAD) | Should -Be $head
+        }
+        It 'accepts positional paths and preserves previously staged changes' {
+            New-TestRepo 'add-positional' -Commit | Out-Null
+            Set-Content existing.txt 'existing'; git add existing.txt
+            Set-Content selected.txt 'selected'
+            Set-Content untouched.txt 'untouched'
+            (gx add selected.txt -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-only) | Should -Be @('existing.txt', 'selected.txt')
+        }
+        It 'stages additions, modifications and deletions with <Flag> even from a subdirectory' -ForEach @(
+            @{ Flag = 'All' }; @{ Flag = 'AddAll' }
+        ) {
+            New-TestRepo ('add-all-' + $Flag) -Commit | Out-Null
+            Set-Content removed.txt 'remove'; git add removed.txt; git commit -qm 'chore: add removable file'
+            Remove-Item removed.txt
+            Add-Content readme.md 'modified'
+            New-Item -ItemType Directory sub | Out-Null
+            Set-Content new.txt 'new'
+            Set-Location sub
+            $flags = @{ $Flag = $true }
+            (gx add @flags -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-status) -join "`n" | Should -Match 'A\s+new.txt'
+            @(git diff --cached --name-status) -join "`n" | Should -Match 'D\s+removed.txt'
+            @(git diff --cached --name-status) -join "`n" | Should -Match 'M\s+readme.md'
+        }
+        It 'stages tracked changes and deletions while leaving new files alone' {
+            New-TestRepo 'add-tracked' -Commit | Out-Null
+            Set-Content removed.txt 'remove'; git add removed.txt; git commit -qm 'chore: tracked seed'
+            Remove-Item removed.txt
+            Add-Content readme.md 'modified'
+            Set-Content new.txt 'new'
+            (gx add -Tracked -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-only) | Should -Be @('readme.md', 'removed.txt')
+        }
+        It 'supports an unborn branch and then commits the staged files separately' {
+            New-TestRepo 'add-first' | Out-Null
+            Set-Content first.txt 'first'
+            (gx add first.txt -PassThru -Quiet).Ok | Should -BeTrue
+            (git rev-list --all --count) | Should -Be '0'
+            (gx commit -Message 'feat: first' -PassThru -Quiet).Ok | Should -BeTrue
+            (git log -1 --format=%s) | Should -Be 'feat: first'
+        }
+        It 'treats path arguments as data including option-looking filenames' {
+            New-TestRepo 'add-literal' -Commit | Out-Null
+            Set-Content -LiteralPath '-option.txt' 'option'
+            Set-Content -LiteralPath 'semi;colon.txt' 'punctuation'
+            (gx add -Add @('-option.txt', 'semi;colon.txt') -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-only) | Should -Be @('-option.txt', 'semi;colon.txt')
+        }
+        It 'prints a dry-run trace without changing the index' {
+            New-TestRepo 'add-dry' -Commit | Out-Null
+            Set-Content selected.txt 'selected'
+            $r = gx add selected.txt -DryRun -CommandTrace -Quiet -PassThru
+            $r.Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            @($r.Data.trace | Where-Object { $_.Kind -eq 'dry' -and $_.Command -like 'git add *' }).Count | Should -Be 1
+        }
+        It 'reports missing paths and rejects ambiguous selections before staging' {
+            New-TestRepo 'add-invalid' -Commit | Out-Null
+            Set-Content selected.txt 'selected'
+            (gx add absent.txt -Quiet -PassThru).Ok | Should -BeFalse
+            (gx add -Quiet -PassThru).Ok | Should -BeFalse
+            (gx add selected.txt -All -Quiet -PassThru).Ok | Should -BeFalse
+            (gx add -All -Tracked -Quiet -PassThru).Ok | Should -BeFalse
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+        }
+        It 'returns clean JSON and refuses operation outside a repository' {
+            New-TestRepo 'add-json' -Commit | Out-Null
+            Set-Content selected.txt 'selected'
+            $r = gx add selected.txt -Json | ConvertFrom-Json
+            $r.Ok | Should -BeTrue
+            $r.Data.add.Paths | Should -Contain 'selected.txt'
+            Set-Location $script:Sandbox
+            $savedCeiling = $env:GIT_CEILING_DIRECTORIES
+            $env:GIT_CEILING_DIRECTORIES = $script:Sandbox
+            try { (gx add -All -PassThru -Quiet).Ok | Should -BeFalse }
+            finally { $env:GIT_CEILING_DIRECTORIES = $savedCeiling }
+        }
+        It 'offers file completion for standalone add' {
+            New-TestRepo 'add-completion' | Out-Null
+            Set-Content selected.txt 'selected'
+            (TabExpansion2 -inputScript 'gx add sele' -cursorColumn 11).CompletionMatches.CompletionText | Should -Contain 'selected.txt'
+        }
+    }
+
     Describe 'commit' {
         It 'takes bare words as the message, and reports the commit' {
             New-TestRepo 'c-basic' | Out-Null
@@ -801,6 +961,35 @@ Describe 'gx' {
             $r = gx status -PassThru -Quiet
             (Row $r 'changes').Level | Should -Be 'warn'
             (Row $r 'changes').Value | Should -Match '1 modified, 1 untracked'
+        }
+        It 'colours tracked and new paths with pastel colours and keeps results plain' {
+            New-Linked 'st-pastel' | Out-Null
+            Add-Content readme.md 'modified'
+            Set-Content new.txt 'new'
+            Mock _GxUseColor { $true }
+            $records = @(gx status -Detail Full -PassThru 6>&1)
+            $display = ($records | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;216m M  readme.md"))
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;151m??  new.txt"))
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;109m"))
+            $r = $records | Where-Object { $_.PSObject.Properties.Name -contains 'Ok' } | Select-Object -Last 1
+            $r.Data.status.Modified | Should -Be 1
+            $r.Data.status.Untracked | Should -Be 1
+            ($r | ConvertTo-Json -Depth 8).Contains([char]27) | Should -BeFalse
+            ($r.Rows.Value -join ' ') | Should -Match '1 modified, 1 untracked'
+        }
+        It 'keeps coloured status values plain under NO_COLOR and in JSON' {
+            New-TestRepo 'st-pastel-plain' -Commit | Out-Null
+            Add-Content readme.md 'modified'
+            Set-Content new.txt 'new'
+            $display = gx status -Detail Full 6>&1 | Out-String
+            $display.Contains([char]27) | Should -BeFalse
+            $display | Should -Match '\?\?  new.txt'
+            $display | Should -Match ' M  readme.md'
+            $r = gx status -Json | ConvertFrom-Json
+            $r.Ok | Should -BeTrue
+            $r.Data.status.Modified | Should -Be 1
+            $r.Data.status.Untracked | Should -Be 1
         }
         It 'shows ahead and behind' {
             New-Linked 'st-ahead' | Out-Null
@@ -1219,6 +1408,42 @@ Describe 'gx' {
         It '-Detail Full adds author and committer lines' {
             (gx log -Quiet -NoPager -Detail Full -Count 1 | Out-String) | Should -Match 'committer'
         }
+        It 'colours subjects and full body lines using the configured palette' {
+            git commit --allow-empty -qm 'feat: coloured subject' -m "First body line`n`nSecond body line"
+            Write-GxConfig @{ palette = @{ subject = 121; body = 180 } }
+            try {
+                Mock _GxUseColor { $true }
+                $full = gx log -Quiet -NoPager -Detail Full -Count 1 | Out-String
+                $full | Should -Match ([regex]::Escape("$([char]27)[38;5;121mfeat: coloured subject"))
+                $full | Should -Match ([regex]::Escape("$([char]27)[38;5;180m"))
+                $full | Should -Match '    First body line'
+                $full | Should -Match '    Second body line'
+                $full | Should -Match 'author'
+                $full | Should -Match 'committer'
+                $compact = gx log -Quiet -NoPager -Count 1 | Out-String
+                $compact | Should -Match 'coloured subject'
+                $compact | Should -Not -Match 'First body line'
+            } finally { Reset-GxConfig }
+        }
+        It 'colours commit previews while keeping result rows free of ANSI' {
+            New-Linked 'coloured-preview' | Out-Null
+            Add-Commit 'preview.txt' '1' 'feat: preview colours'
+            Mock _GxUseColor { $true }
+            $records = @(gx push -DryRun -PassThru 6>&1)
+            $display = ($records | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;252mfeat: preview colours"))
+            $r = $records | Where-Object { $_.PSObject.Properties.Name -contains 'Ok' } | Select-Object -Last 1
+            $r.Ok | Should -BeTrue
+            ($r.Rows.Value -join '').Contains([char]27) | Should -BeFalse
+        }
+        It 'keeps full log bodies plain under NO_COLOR even when Git prefers colour' {
+            git commit --allow-empty -qm 'feat: plain subject' -m 'Plain body line'
+            git config --local color.ui always
+            $full = gx log -Quiet -NoPager -Detail Full -Count 1 | Out-String
+            $full | Should -Match 'plain subject'
+            $full | Should -Match '    Plain body line'
+            $full.Contains([char]27) | Should -BeFalse
+        }
         It 'propagates a streamed git failure to the result and exit code' {
             New-TestRepo 'ld-fail' -Commit | Out-Null
 
@@ -1473,6 +1698,15 @@ Describe 'gx' {
             $LASTEXITCODE | Should -Be 0
             (git log -1 --format=%s) | Should -Be 'fix: fix the parser bug'
         }
+        It 'stages positional paths when the single-file script is executed directly' {
+            New-TestRepo 'run-add' | Out-Null
+            Set-Content one.txt 'one'
+            Set-Content 'two words.txt' 'two'
+            & $script:Run @('add', 'one.txt', 'two words.txt', '-Quiet') | Out-Null
+            $LASTEXITCODE | Should -Be 0
+            @(git diff --cached --name-only) | Should -Be @('one.txt', 'two words.txt')
+            (git rev-list --all --count) | Should -Be '0'
+        }
         It 'propagates the exit code (0 on success, 1 on failure)' {
             New-TestRepo 'run3' -Commit | Out-Null
             & $script:Run @('status', '-Quiet') | Out-Null;  $LASTEXITCODE | Should -Be 0
@@ -1500,6 +1734,24 @@ Describe 'gx' {
             $c.CmdletBinding | Should -BeTrue
             $c.Parameters.Keys | Should -Contain 'Verbose'
             $c.Parameters.Keys | Should -Contain 'ErrorAction'
+        }
+    }
+
+    Describe 'ShellDock Git integration' {
+        It 'preserves commit failures, stderr and trace data without adding JSON noise' {
+            New-TestRepo 'dock-hook' -Commit | Out-Null
+            Set-Content file.txt 'pending'
+            $hook = Join-Path (Get-Location).Path '.git/hooks/pre-commit'
+            [IO.File]::WriteAllText($hook, "#!/bin/sh`necho hook-refused >&2`nexit 1`n", [Text.UTF8Encoding]::new($false))
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($hook, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute) }
+            $json = gx commit -Message 'chore: hook failure' -AddAll -Json -CommandTrace
+            $r = $json | ConvertFrom-Json
+            $r.Ok | Should -BeFalse
+            @($r.Rows | Where-Object { $_.Value -eq 'hook-refused' }).Count | Should -Be 1
+            $commitTrace = @($r.Data.trace | Where-Object { $_.Command -like 'git commit *' })
+            $commitTrace.Count | Should -Be 1
+            $commitTrace[0].ExitCode | Should -Be 1
+            (git log -1 --format=%s) | Should -Be 'chore: seed'
         }
     }
 
