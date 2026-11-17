@@ -11,6 +11,8 @@
 Describe 'gx' {
     BeforeAll {
         $script:GxFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'gx.ps1'
+        $script:GxLauncher = Join-Path (Split-Path $PSScriptRoot -Parent) 'gx'
+        $script:Pwsh = (Get-Process -Id $PID).Path
 
         $script:Sandbox = (New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('gx-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))).FullName
         $script:Saved = @{
@@ -32,6 +34,10 @@ Describe 'gx' {
         $env:NO_COLOR = '1'
 
         . $script:GxFile
+        # Keep tests independent of a customised provider variable in the main config.
+        $script:GithubTokenVar = $script:GxConfig.Providers.github.TokenVar
+        $script:Saved.GithubProviderToken = [Environment]::GetEnvironmentVariable($script:GithubTokenVar)
+        [Environment]::SetEnvironmentVariable($script:GithubTokenVar, $env:GITHUB_API_KEY)
 
         # ---- helpers -------------------------------------------------------------
         function New-Remote {
@@ -76,6 +82,7 @@ Describe 'gx' {
     }
 
     AfterAll {
+        [Environment]::SetEnvironmentVariable($script:GithubTokenVar, $script:Saved.GithubProviderToken)
         Set-Location $script:Saved.Loc
         $env:GIT_CONFIG_GLOBAL = $script:Saved.Global; $env:GITLAB_API_KEY = $script:Saved.Gitlab; $env:GITHUB_API_KEY = $script:Saved.Github
         $env:GITEA_API_KEY = $script:Saved.Gitea; $env:GX_CONFIG = $script:Saved.Cfg; $env:NO_COLOR = $script:Saved.NoColor
@@ -178,6 +185,46 @@ Describe 'gx' {
             $script:GxConfig.CommitTypes | Should -Contain 'hotfix'
             $script:GxConfig.CommitTypes | Should -Contain 'feat'
         }
+        It 'uses originType from the config for new remotes and accepts explicit overrides' {
+            Write-GxConfig @{ originType = 'github' }
+            $script:GxConfig.OriginType | Should -Be 'github'
+            New-TestRepo 'config-provider' -Commit | Out-Null
+            (gx setup -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://github.com/sgkens/config-provider.git'
+            New-TestRepo 'config-provider-override' -Commit | Out-Null
+            (gx setup -OriginType gitlab -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://gitlab.com/sgkens/config-provider-override.git'
+        }
+        It 'keeps the existing host when originType is only a default' {
+            Write-GxConfig @{ originType = 'github' }
+            New-TestRepo 'config-existing' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/sgkens/config-existing.git'
+            (gx setup -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://gitlab.com/sgkens/config-existing.git'
+        }
+        It 'reports invalid originType values and retains the default' {
+            Write-GxConfig @{ originType = 'invalid' }
+            $script:GxConfig.OriginType | Should -Be (_GxDefaultConfig).OriginType
+            $script:GxConfigState.Notes -join ' ' | Should -Match 'originType must be'
+        }
+        It 'reloads edited configuration in the existing session' {
+            Write-GxConfig @{ originType = 'gitlab'; logCount = 7 }
+            @{ originType = 'github'; logCount = 3 } | ConvertTo-Json | Set-Content -LiteralPath $env:GX_CONFIG
+            $script:GxConfig.OriginType | Should -Be 'gitlab'
+            $r = gx config -Reload -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Data.config.OriginType | Should -Be 'github'
+            $script:GxConfig.LogCount | Should -Be 3
+            $r.Data.config.Loaded | Should -BeTrue
+        }
+        It 'accepts a sh helper preference and rejects invalid settings' {
+            Write-GxConfig @{ tokenHelperShell = 'Sh' }
+            $script:GxConfig.TokenHelperShell | Should -Be 'Sh'
+            $script:GxConfigState.Unknown | Should -BeNullOrEmpty
+            Write-GxConfig @{ tokenHelperShell = 'bash' }
+            $script:GxConfig.TokenHelperShell | Should -Be 'PowerShell'
+            $script:GxConfigState.Notes -join ' ' | Should -Match 'tokenHelperShell'
+        }
         It 'maps self-hosted hosts to a provider type' {
             Write-GxConfig @{ hosts = @{ 'git.corp.example' = 'gitlab'; 'code.example' = 'gitea' } }
             _GxInferType 'git.corp.example' 'custom' | Should -Be 'gitlab'
@@ -237,12 +284,79 @@ Describe 'gx' {
     }
 
     Describe 'Credential helper' {
-        It 'is unquoted and reads the variable at use time' {
+        AfterEach { Reset-GxConfig }
+
+        It 'defaults to pwsh without embedding the token' {
             $h = _GxHelperCmd 'sgkens' 'MY_TOKEN'
-            $h | Should -Not -Match '"'
-            $h | Should -Match 'password=\$MY_TOKEN'
-            $h | Should -Match ':\+x'
+            $h | Should -Match 'pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand'
+            $h | Should -Match 'gx-token-var=MY_TOKEN'
+            $h | Should -Not -Match ([regex]::Escape($script:Token))
         }
+
+        It 'preserves credentials and reads rotations with <Shell> helpers' -ForEach @(
+            @{ Shell = 'PowerShell' }; @{ Shell = 'Sh' }
+        ) {
+            Write-GxConfig @{ tokenHelperShell = $Shell }
+            New-TestRepo ('helper-' + $Shell) -Commit | Out-Null
+            $savedToken = $env:GITLAB_API_KEY
+            $savedPrompt = $env:GIT_TERMINAL_PROMPT
+            try {
+                $env:GITLAB_API_KEY = 'fake space * ? [abc] $value ; "quoted" \ slash'
+                (gx setup -Name helper -PassThru -Quiet).Ok | Should -BeTrue
+                _GxHelperVar 'gitlab.com' | Should -Be 'GITLAB_API_KEY'
+                $env:GIT_TERMINAL_PROMPT = '0'
+                foreach ($value in @($env:GITLAB_API_KEY, 'fake-rotated-token')) {
+                    $env:GITLAB_API_KEY = $value
+                    $out = @("protocol=https`nhost=gitlab.com`n`n" | git credential fill)
+                    $LASTEXITCODE | Should -Be 0
+                    $out | Should -Contain ('password=' + $value)
+                }
+                LocalCfg | Should -Not -Match 'fake-rotated-token'
+                $env:GITLAB_API_KEY = $null
+                $out = @("protocol=https`nhost=gitlab.com`n`n" | git credential fill 2>$null)
+                $out -join '|' | Should -Not -Match 'password='
+            } finally {
+                $env:GITLAB_API_KEY = $savedToken
+                $env:GIT_TERMINAL_PROMPT = $savedPrompt
+            }
+        }
+
+        It 'recognises and refreshes a legacy sh helper' {
+            New-TestRepo 'helper-legacy' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/sgkens/helper-legacy.git'
+            git config --local credential.https://gitlab.com.helper '!f() { echo username=sgkens; echo password=$GITLAB_API_KEY; }; f'
+            _GxHelperVar 'gitlab.com' | Should -Be 'GITLAB_API_KEY'
+            (gx setup -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get-all credential.https://gitlab.com.helper) -join ' ' | Should -Match 'pwsh'
+        }
+
+        It 'requires an environment variable rather than an ordinary PowerShell variable' {
+            New-TestRepo 'helper-env-only' -Commit | Out-Null
+            $savedToken = $env:GITLAB_API_KEY
+            $env:GITLAB_API_KEY = $null
+            $GITLAB_API_KEY = 'ordinary-variable-only'
+            try {
+                $r = gx setup -PassThru -Quiet
+                $r.Ok | Should -BeFalse
+                (Row $r 'token').Value | Should -Match '\$env:GITLAB_API_KEY'
+                git config --local --get remote.origin.url | Should -BeNullOrEmpty
+            } finally { $env:GITLAB_API_KEY = $savedToken }
+        }
+
+        It 'keeps custom helper tokens covered by the commit guard' {
+            New-TestRepo 'helper-custom-guard' -Commit | Out-Null
+            $savedToken = $env:GX_TEST_CUSTOM_TOKEN
+            $env:GX_TEST_CUSTOM_TOKEN = 'custom-secret-without-provider-prefix'
+            try {
+                (gx setup -TokenVar GX_TEST_CUSTOM_TOKEN -PassThru -Quiet).Ok | Should -BeTrue
+                Set-Content leaked.txt $env:GX_TEST_CUSTOM_TOKEN
+                $r = gx commit -Message 'test custom guard' -AddAll -PassThru -Quiet
+                $r.Ok | Should -BeFalse
+                HasRow $r 'guard' 'fail' | Should -BeTrue
+                $r.Rows.Value -join ' ' | Should -Not -Match $env:GX_TEST_CUSTOM_TOKEN
+            } finally { $env:GX_TEST_CUSTOM_TOKEN = $savedToken }
+        }
+
         It 'returns the token to git when the variable is set, and nothing when it is not' {
             $d = New-TestRepo 'helper1' -Commit
             gx setup -Name helper1 -Quiet
@@ -267,6 +381,32 @@ Describe 'gx' {
             (git config --local --get remote.origin.url) | Should -Be 'https://gitlab.com/sgkens/s-clean.git'
             LocalCfg | Should -Not -Match ([regex]::Escape($script:Token))
             LocalCfg | Should -Match 'credential\.https://gitlab\.com\.helper=.*GITLAB_API_KEY'
+        }
+        It 'selects the explicit provider server and requires Force before changing hosts' {
+            New-TestRepo 'provider-switch' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/team/provider-switch.git'
+            $before = LocalCfg
+            $r = gx setup -OriginType github -TokenStorage Manager -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            (Row $r 'resolved').Value | Should -Match 'github.com'
+            LocalCfg | Should -Be $before
+            (gx setup -OriginType github -TokenStorage Manager -Force -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://github.com/team/provider-switch.git'
+        }
+        It 'infers the provider from an explicit Server before the existing host' {
+            New-TestRepo 'provider-server' -Commit | Out-Null
+            git remote add origin 'https://gitlab.com/team/provider-server.git'
+            (gx setup -Server github.com -TokenStorage Manager -Force -PassThru -Quiet).Ok | Should -BeTrue
+            (git config --local --get remote.origin.url) | Should -Be 'https://github.com/team/provider-server.git'
+        }
+        It 'preserves a self-hosted server when the explicitly selected provider matches' {
+            Write-GxConfig @{ hosts = @{ 'git.corp.example' = 'gitlab' } }
+            try {
+                New-TestRepo 'provider-selfhosted' -Commit | Out-Null
+                git remote add origin 'https://git.corp.example/team/tool.git'
+                (gx setup -OriginType gitlab -TokenStorage Manager -PassThru -Quiet).Ok | Should -BeTrue
+                (git config --local --get remote.origin.url) | Should -Be 'https://git.corp.example/team/tool.git'
+            } finally { Reset-GxConfig }
         }
         It 'is idempotent' {
             New-TestRepo 's-idem' -Commit | Out-Null
@@ -517,6 +657,103 @@ Describe 'gx' {
         }
     }
 
+    Describe 'standalone add' {
+        It 'stages a string array without making a commit or including other files' {
+            New-TestRepo 'add-array' -Commit | Out-Null
+            Set-Content one.txt 'one'
+            Set-Content 'two words.txt' 'two'
+            Set-Content other.txt 'other'
+            $head = git rev-parse HEAD
+            $r = gx add -Add @('one.txt', 'two words.txt') -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Mode | Should -Be 'Add'
+            @(git diff --cached --name-only) | Should -Be @('one.txt', 'two words.txt')
+            (git rev-parse HEAD) | Should -Be $head
+        }
+        It 'accepts positional paths and preserves previously staged changes' {
+            New-TestRepo 'add-positional' -Commit | Out-Null
+            Set-Content existing.txt 'existing'; git add existing.txt
+            Set-Content selected.txt 'selected'
+            Set-Content untouched.txt 'untouched'
+            (gx add selected.txt -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-only) | Should -Be @('existing.txt', 'selected.txt')
+        }
+        It 'stages additions, modifications and deletions with <Flag> even from a subdirectory' -ForEach @(
+            @{ Flag = 'All' }; @{ Flag = 'AddAll' }
+        ) {
+            New-TestRepo ('add-all-' + $Flag) -Commit | Out-Null
+            Set-Content removed.txt 'remove'; git add removed.txt; git commit -qm 'chore: add removable file'
+            Remove-Item removed.txt
+            Add-Content readme.md 'modified'
+            New-Item -ItemType Directory sub | Out-Null
+            Set-Content new.txt 'new'
+            Set-Location sub
+            $flags = @{ $Flag = $true }
+            (gx add @flags -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-status) -join "`n" | Should -Match 'A\s+new.txt'
+            @(git diff --cached --name-status) -join "`n" | Should -Match 'D\s+removed.txt'
+            @(git diff --cached --name-status) -join "`n" | Should -Match 'M\s+readme.md'
+        }
+        It 'stages tracked changes and deletions while leaving new files alone' {
+            New-TestRepo 'add-tracked' -Commit | Out-Null
+            Set-Content removed.txt 'remove'; git add removed.txt; git commit -qm 'chore: tracked seed'
+            Remove-Item removed.txt
+            Add-Content readme.md 'modified'
+            Set-Content new.txt 'new'
+            (gx add -Tracked -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-only) | Should -Be @('readme.md', 'removed.txt')
+        }
+        It 'supports an unborn branch and then commits the staged files separately' {
+            New-TestRepo 'add-first' | Out-Null
+            Set-Content first.txt 'first'
+            (gx add first.txt -PassThru -Quiet).Ok | Should -BeTrue
+            (git rev-list --all --count) | Should -Be '0'
+            (gx commit -Message 'feat: first' -PassThru -Quiet).Ok | Should -BeTrue
+            (git log -1 --format=%s) | Should -Be 'feat: first'
+        }
+        It 'treats path arguments as data including option-looking filenames' {
+            New-TestRepo 'add-literal' -Commit | Out-Null
+            Set-Content -LiteralPath '-option.txt' 'option'
+            Set-Content -LiteralPath 'semi;colon.txt' 'punctuation'
+            (gx add -Add @('-option.txt', 'semi;colon.txt') -PassThru -Quiet).Ok | Should -BeTrue
+            @(git diff --cached --name-only) | Should -Be @('-option.txt', 'semi;colon.txt')
+        }
+        It 'prints a dry-run trace without changing the index' {
+            New-TestRepo 'add-dry' -Commit | Out-Null
+            Set-Content selected.txt 'selected'
+            $r = gx add selected.txt -DryRun -CommandTrace -Quiet -PassThru
+            $r.Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            @($r.Data.trace | Where-Object { $_.Kind -eq 'dry' -and $_.Command -like 'git add *' }).Count | Should -Be 1
+        }
+        It 'reports missing paths and rejects ambiguous selections before staging' {
+            New-TestRepo 'add-invalid' -Commit | Out-Null
+            Set-Content selected.txt 'selected'
+            (gx add absent.txt -Quiet -PassThru).Ok | Should -BeFalse
+            (gx add -Quiet -PassThru).Ok | Should -BeFalse
+            (gx add selected.txt -All -Quiet -PassThru).Ok | Should -BeFalse
+            (gx add -All -Tracked -Quiet -PassThru).Ok | Should -BeFalse
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+        }
+        It 'returns clean JSON and refuses operation outside a repository' {
+            New-TestRepo 'add-json' -Commit | Out-Null
+            Set-Content selected.txt 'selected'
+            $r = gx add selected.txt -Json | ConvertFrom-Json
+            $r.Ok | Should -BeTrue
+            $r.Data.add.Paths | Should -Contain 'selected.txt'
+            Set-Location $script:Sandbox
+            $savedCeiling = $env:GIT_CEILING_DIRECTORIES
+            $env:GIT_CEILING_DIRECTORIES = $script:Sandbox
+            try { (gx add -All -PassThru -Quiet).Ok | Should -BeFalse }
+            finally { $env:GIT_CEILING_DIRECTORIES = $savedCeiling }
+        }
+        It 'offers file completion for standalone add' {
+            New-TestRepo 'add-completion' | Out-Null
+            Set-Content selected.txt 'selected'
+            (TabExpansion2 -inputScript 'gx add sele' -cursorColumn 11).CompletionMatches.CompletionText | Should -Contain 'selected.txt'
+        }
+    }
+
     Describe 'commit' {
         It 'takes bare words as the message, and reports the commit' {
             New-TestRepo 'c-basic' | Out-Null
@@ -727,6 +964,35 @@ Describe 'gx' {
             (Row $r 'changes').Level | Should -Be 'warn'
             (Row $r 'changes').Value | Should -Match '1 modified, 1 untracked'
         }
+        It 'colours tracked and new paths with pastel colours and keeps results plain' {
+            New-Linked 'st-pastel' | Out-Null
+            Add-Content readme.md 'modified'
+            Set-Content new.txt 'new'
+            Mock _GxUseColor { $true }
+            $records = @(gx status -Detail Full -PassThru 6>&1)
+            $display = ($records | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;216m M  readme.md"))
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;151m??  new.txt"))
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;109m"))
+            $r = $records | Where-Object { $_.PSObject.Properties.Name -contains 'Ok' } | Select-Object -Last 1
+            $r.Data.status.Modified | Should -Be 1
+            $r.Data.status.Untracked | Should -Be 1
+            ($r | ConvertTo-Json -Depth 8).Contains([char]27) | Should -BeFalse
+            ($r.Rows.Value -join ' ') | Should -Match '1 modified, 1 untracked'
+        }
+        It 'keeps coloured status values plain under NO_COLOR and in JSON' {
+            New-TestRepo 'st-pastel-plain' -Commit | Out-Null
+            Add-Content readme.md 'modified'
+            Set-Content new.txt 'new'
+            $display = gx status -Detail Full 6>&1 | Out-String
+            $display.Contains([char]27) | Should -BeFalse
+            $display | Should -Match '\?\?  new.txt'
+            $display | Should -Match ' M  readme.md'
+            $r = gx status -Json | ConvertFrom-Json
+            $r.Ok | Should -BeTrue
+            $r.Data.status.Modified | Should -Be 1
+            $r.Data.status.Untracked | Should -Be 1
+        }
         It 'shows ahead and behind' {
             New-Linked 'st-ahead' | Out-Null
             Add-Commit 'f.txt' '1' 'local'
@@ -752,6 +1018,27 @@ Describe 'gx' {
             $d = Join-Path $script:Sandbox 'not-a-repo'; New-Item -ItemType Directory $d -Force | Out-Null; Set-Location $d
             $env:GIT_CEILING_DIRECTORIES = $script:Sandbox
             try { (gx status -PassThru -Quiet).Ok | Should -BeFalse } finally { $env:GIT_CEILING_DIRECTORIES = $null }
+        }
+        It 'styles branch state and commit hash only in host output' {
+            New-Linked 'st-style' | Out-Null
+            $structured = gx status -PassThru -Quiet
+            (Row $structured 'branch').Value | Should -Be 'main -> origin/main  [in sync]'
+            (Row $structured 'branch').Value | Should -Not -Match "$([char]27)\["
+            (Row $structured 'last commit').Value | Should -Not -Match "$([char]27)\["
+
+            $script:GxRows = [System.Collections.Generic.List[object]]::new()
+            $script:GxQuiet = $false
+            $script:GxOk = $true
+            $script:GxColorOn = $true
+            try {
+                $hostText = ((& { _GxStatus @{ Detail = 'Compact' } } 6>&1) | ForEach-Object { $_.MessageData.ToString() }) -join "`n"
+                $hostText | Should -Match "$([char]27)\[3m"
+                $hostText | Should -Match "$([char]27)\[38;5;$($script:GxConfig.Palette.ok)m\[in sync\]"
+                $hostText | Should -Match "$([char]27)\[38;5;$($script:GxConfig.Palette.hash)m[0-9a-f]+"
+            } finally {
+                $script:GxColorOn = $false
+                $script:GxQuiet = $false
+            }
         }
     }
 
@@ -834,7 +1121,7 @@ Describe 'gx' {
         }
     }
 
-    Describe 'branch, switch and undo' {
+    Describe 'branch, switch, rebase and undo' {
         It 'lists branches in the result data' {
             New-Linked 'b-list' | Out-Null
             git branch -q feat/a
@@ -881,6 +1168,182 @@ Describe 'gx' {
             Set-Location (Join-Path $script:Sandbox 'work/sw2'); git fetch -q
             (gx switch feat/remote -PassThru -Quiet).Ok | Should -BeTrue
             (git rev-parse --abbrev-ref '@{u}') | Should -Be 'origin/feat/remote'
+        }
+        It 'rebases onto the default branch and exposes structured result data' {
+            New-TestRepo 'rb-success' -Commit | Out-Null
+            git switch -qc feature; Add-Commit 'feature.txt' 'feature' 'feature work'
+            git switch -q main; Add-Commit 'main.txt' 'main' 'main work'
+            git switch -q feature
+            $r = gx rebase -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Data.rebase.Action | Should -Be 'start'
+            $r.Data.rebase.Base | Should -Be 'main'
+            $r.Data.rebase.State | Should -BeNullOrEmpty
+            (git merge-base HEAD main) | Should -Be (git rev-parse main)
+        }
+        It 'reports conflicts and abort restores the original branch state' {
+            New-TestRepo 'rb-abort' -Commit | Out-Null
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            $original = git rev-parse HEAD
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            $r = gx rebase main -PassThru -Quiet
+            $r.Ok | Should -BeFalse
+            $r.Data.rebase.State | Should -Be 'rebase in progress'
+            $r.Data.rebase.Conflicts | Should -Contain 'shared.txt'
+            AnyText $r 'gx rebase -Continue' | Should -BeTrue
+            (gx rebase -Abort -PassThru -Quiet).Ok | Should -BeTrue
+            (git branch --show-current) | Should -Be 'feature'
+            (git rev-parse HEAD) | Should -Be $original
+        }
+        It 'continues after conflict resolution with an explicitly configured script editor' {
+            New-TestRepo 'rb-continue' -Commit | Out-Null
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            (gx rebase main -PassThru -Quiet).Ok | Should -BeFalse
+            Set-Content shared.txt resolved; git add shared.txt
+            $savedEditor = $env:GIT_EDITOR
+            try {
+                $env:GIT_EDITOR = 'true'
+                (gx rebase -Continue -PassThru -Quiet).Ok | Should -BeTrue
+            } finally { $env:GIT_EDITOR = $savedEditor }
+            (git branch --show-current) | Should -Be 'feature'
+            (git merge-base HEAD main) | Should -Be (git rev-parse main)
+        }
+        It 'skips a conflicting commit and completes the rebase' {
+            New-TestRepo 'rb-skip' -Commit | Out-Null
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            (gx rebase main -PassThru -Quiet).Ok | Should -BeFalse
+            (gx rebase -Skip -PassThru -Quiet).Ok | Should -BeTrue
+            (Get-Content shared.txt -Raw).Trim() | Should -Be 'main'
+            (git rev-parse HEAD) | Should -Be (git rev-parse main)
+        }
+        It 'autostashes tracked changes and restores them after rebasing' {
+            New-TestRepo 'rb-autostash' -Commit | Out-Null
+            git switch -qc feature; Add-Commit 'feature.txt' 'feature' 'feature work'
+            git switch -q main; Add-Commit 'main.txt' 'main' 'main work'
+            git switch -q feature; Add-Content readme.md 'local edit'
+            AnyText (gx rebase main -PassThru -Quiet) 'use -Autostash' | Should -BeTrue
+            $r = gx rebase main -Autostash -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (Get-Content readme.md -Raw) | Should -Match 'local edit'
+            (git status --porcelain) | Should -Match 'readme.md'
+        }
+        It 'rejects detached HEAD, invalid bases and incompatible lifecycle actions' {
+            New-TestRepo 'rb-preflight' -Commit | Out-Null
+            (gx rebase missing -PassThru -Quiet).Ok | Should -BeFalse
+            git checkout -q --detach HEAD
+            AnyText (gx rebase main -PassThru -Quiet) 'detached HEAD' | Should -BeTrue
+            git switch -q main
+            AnyText (gx rebase -Continue -Abort -PassThru -Quiet) 'mutually exclusive' | Should -BeTrue
+        }
+        It 'keeps dry-run non-mutating and includes optional git flags' {
+            New-TestRepo 'rb-dry' -Commit | Out-Null
+            git switch -qc feature; Add-Commit 'feature.txt' 'feature' 'feature work'
+            git switch -q main; Add-Commit 'main.txt' 'main' 'main work'
+            git switch -q feature
+            $before = git rev-parse HEAD
+            $r = gx rebase main -Autostash -Interactive -UpdateRefs -DryRun -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            (git rev-parse HEAD) | Should -Be $before
+            AnyText $r '--autostash' | Should -BeTrue
+            AnyText $r '--interactive' | Should -BeTrue
+            AnyText $r '--update-refs' | Should -BeTrue
+        }
+        It 'refuses interactive rebase and an implicit continue editor outside a terminal' {
+            New-TestRepo 'rb-noninteractive' -Commit | Out-Null
+            AnyText (gx rebase main -Interactive -PassThru -Quiet) 'interactive terminal' | Should -BeTrue
+            Set-Content shared.txt base; git add shared.txt; git commit -qm shared
+            git switch -qc feature; Set-Content shared.txt feature; git commit -qam feature
+            git switch -q main; Set-Content shared.txt main; git commit -qam main
+            git switch -q feature
+            (gx rebase main -PassThru -Quiet).Ok | Should -BeFalse
+            $savedEditor = $env:GIT_EDITOR
+            try {
+                $env:GIT_EDITOR = $null
+                AnyText (gx rebase -Continue -PassThru -Quiet) 'may open an editor' | Should -BeTrue
+            } finally { $env:GIT_EDITOR = $savedEditor }
+            (gx rebase -Abort -PassThru -Quiet).Ok | Should -BeTrue
+        }
+        It 'stages only the selected literal paths and reports the index' {
+            New-TestRepo 'st-selected' -Commit | Out-Null
+            Set-Content one.txt one; Set-Content two.txt two
+            $r = gx stage one.txt -PassThru -Quiet
+            $r.Ok | Should -BeTrue
+            $r.Data.staging.StagedCount | Should -Be 1
+            (git diff --cached --name-only) | Should -Contain 'one.txt'
+            ((git status --porcelain) -join "`n") | Should -Match '\?\? two.txt'
+        }
+        It 'supports all, tracked-only and intent-to-add staging' {
+            New-TestRepo 'st-modes' -Commit | Out-Null
+            Add-Content readme.md tracked; Set-Content new.txt new
+            (gx stage -Tracked -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain 'readme.md'
+            (git diff --cached --name-only) | Should -Not -Contain 'new.txt'
+            (gx stage new.txt -Intent -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --name-only) | Should -Contain 'new.txt'
+            gx unstage -Quiet
+            (gx stage -All -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain 'new.txt'
+        }
+        It 'treats a filename beginning with a dash as a path, not an option' {
+            New-TestRepo 'st-dash' -Commit | Out-Null
+            Set-Content -LiteralPath './-odd.txt' -Value 'odd'
+            (gx stage '-odd.txt' -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain '-odd.txt'
+            (gx unstage '-odd.txt' -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Not -Contain '-odd.txt'
+        }
+        It 'unstages selected paths or the whole index without changing files' {
+            New-TestRepo 'unstage-head' -Commit | Out-Null
+            Set-Content one.txt one; Set-Content two.txt two; git add -- one.txt two.txt
+            (gx unstage one.txt -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -Not -Contain 'one.txt'
+            (Get-Content one.txt -Raw).Trim() | Should -Be 'one'
+            (gx unstage -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            (Get-Content two.txt -Raw).Trim() | Should -Be 'two'
+        }
+        It 'unstages safely before the first commit and preserves worktree content' {
+            New-TestRepo 'unstage-unborn' | Out-Null
+            Set-Content first.txt first; git add -- first.txt
+            (gx unstage -PassThru -Quiet).Ok | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            (Get-Content first.txt -Raw).Trim() | Should -Be 'first'
+            (git status --porcelain) | Should -Match '\?\? first.txt'
+        }
+        It 'validates staging selectors and interactive terminal requirements' {
+            New-TestRepo 'st-guard' -Commit | Out-Null
+            Set-Content one.txt one
+            AnyText (gx stage -PassThru -Quiet) 'provide paths' | Should -BeTrue
+            AnyText (gx stage -All -Tracked -PassThru -Quiet) 'mutually exclusive' | Should -BeTrue
+            AnyText (gx stage one.txt -Patch -PassThru -Quiet) 'interactive terminal' | Should -BeTrue
+            git add one.txt
+            AnyText (gx unstage one.txt -Patch -PassThru -Quiet) 'interactive terminal' | Should -BeTrue
+        }
+        It 'previews patch staging and unstaging without changing the index' {
+            New-TestRepo 'st-dry' -Commit | Out-Null
+            Add-Content readme.md changed
+            $stage = gx stage readme.md -Patch -DryRun -PassThru -Quiet
+            $stage.Ok | Should -BeTrue
+            AnyText $stage 'add --patch -- readme.md' | Should -BeTrue
+            (git diff --cached --name-only) | Should -BeNullOrEmpty
+            git add readme.md
+            $unstage = gx unstage readme.md -Patch -DryRun -PassThru -Quiet
+            $unstage.Ok | Should -BeTrue
+            AnyText $unstage 'restore --staged --patch -- readme.md' | Should -BeTrue
+            (git diff --cached --name-only) | Should -Contain 'readme.md'
+        }
+        It 'refuses patch unstaging before the first commit' {
+            New-TestRepo 'unstage-unborn-patch' | Out-Null
+            Set-Content first.txt first; git add first.txt
+            AnyText (gx unstage first.txt -Patch -PassThru -Quiet) 'before the first commit' | Should -BeTrue
         }
         It 'undo soft-resets commits and keeps the changes staged' {
             New-Linked 'u1' | Out-Null
@@ -1144,6 +1607,42 @@ Describe 'gx' {
         It '-Detail Full adds author and committer lines' {
             (gx log -Quiet -NoPager -Detail Full -Count 1 | Out-String) | Should -Match 'committer'
         }
+        It 'colours subjects and full body lines using the configured palette' {
+            git commit --allow-empty -qm 'feat: coloured subject' -m "First body line`n`nSecond body line"
+            Write-GxConfig @{ palette = @{ subject = 121; body = 180 } }
+            try {
+                Mock _GxUseColor { $true }
+                $full = gx log -Quiet -NoPager -Detail Full -Count 1 | Out-String
+                $full | Should -Match ([regex]::Escape("$([char]27)[38;5;121mfeat: coloured subject"))
+                $full | Should -Match ([regex]::Escape("$([char]27)[38;5;180m"))
+                $full | Should -Match '    First body line'
+                $full | Should -Match '    Second body line'
+                $full | Should -Match 'author'
+                $full | Should -Match 'committer'
+                $compact = gx log -Quiet -NoPager -Count 1 | Out-String
+                $compact | Should -Match 'coloured subject'
+                $compact | Should -Not -Match 'First body line'
+            } finally { Reset-GxConfig }
+        }
+        It 'colours commit previews while keeping result rows free of ANSI' {
+            New-Linked 'coloured-preview' | Out-Null
+            Add-Commit 'preview.txt' '1' 'feat: preview colours'
+            Mock _GxUseColor { $true }
+            $records = @(gx push -DryRun -PassThru 6>&1)
+            $display = ($records | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
+            $display | Should -Match ([regex]::Escape("$([char]27)[38;5;252mfeat: preview colours"))
+            $r = $records | Where-Object { $_.PSObject.Properties.Name -contains 'Ok' } | Select-Object -Last 1
+            $r.Ok | Should -BeTrue
+            ($r.Rows.Value -join '').Contains([char]27) | Should -BeFalse
+        }
+        It 'keeps full log bodies plain under NO_COLOR even when Git prefers colour' {
+            git commit --allow-empty -qm 'feat: plain subject' -m 'Plain body line'
+            git config --local color.ui always
+            $full = gx log -Quiet -NoPager -Detail Full -Count 1 | Out-String
+            $full | Should -Match 'plain subject'
+            $full | Should -Match '    Plain body line'
+            $full.Contains([char]27) | Should -BeFalse
+        }
         It 'propagates a streamed git failure to the result and exit code' {
             New-TestRepo 'ld-fail' -Commit | Out-Null
 
@@ -1247,7 +1746,7 @@ Describe 'gx' {
             $r = gx doctor -PassThru -Quiet
             $r.Ok | Should -BeTrue
             HasRow $r 'git' 'ok' | Should -BeTrue
-            (Row $r '$GITLAB_API_KEY').Value | Should -Match 'set \(\d+ chars\)'
+            (Row $r '$env:GITLAB_API_KEY').Value | Should -Match 'set \(\d+ chars\)'
             ($r.Rows.Value -join ' ') | Should -Not -Match ([regex]::Escape($script:Token))
         }
         It 'doctor -Fix sets only unset recommendations' {
@@ -1264,6 +1763,10 @@ Describe 'gx' {
     }
 
     Describe 'help' {
+        It 'shows the prerelease product title' {
+            $all = (& { gx help } 6>&1 | Out-String)
+            $all | Should -Match 'Git Executor \(GX\) v0\.0\.0 prerelease'
+        }
         It 'has documentation for every mode the command accepts' {
             $modes = (Get-Command gx).Parameters['Mode'].Attributes.ValidValues | Where-Object { $_ -ne 'Help' }
             foreach ($m in $modes) { $script:GxDocs.ContainsKey($m.ToLower()) | Should -BeTrue -Because "mode '$m' needs an entry in the help table" }
@@ -1271,7 +1774,7 @@ Describe 'gx' {
         }
         It 'gx <Mode> -Help prints usage, options and examples' -ForEach @(
             @{ Mode = 'status' }, @{ Mode = 'setup' }, @{ Mode = 'init' }, @{ Mode = 'clone' }, @{ Mode = 'mirror' }, @{ Mode = 'commit' }
-            @{ Mode = 'push' }, @{ Mode = 'pull' }, @{ Mode = 'sync' }, @{ Mode = 'branch' }, @{ Mode = 'switch' }, @{ Mode = 'undo' }
+            @{ Mode = 'push' }, @{ Mode = 'pull' }, @{ Mode = 'sync' }, @{ Mode = 'branch' }, @{ Mode = 'switch' }, @{ Mode = 'rebase' }, @{ Mode = 'stage' }, @{ Mode = 'unstage' }, @{ Mode = 'undo' }
             @{ Mode = 'tag' }, @{ Mode = 'log' }, @{ Mode = 'diff' }, @{ Mode = 'open' }, @{ Mode = 'ignore' }, @{ Mode = 'config' }
             @{ Mode = 'check' }, @{ Mode = 'doctor' }, @{ Mode = 'sweep' }
         ) {
@@ -1305,6 +1808,22 @@ Describe 'gx' {
             $plain = & $txt { _GxHelp }
             $plain | Should -Not -Match "$([char]27)\["
         }
+        It 'uses branded group headers and mode-specific parameter hints' {
+            $script:GxColorOn = $false
+            $plain = (& { _GxHelp } 6>&1 | Out-String)
+            $plain | Should -Match '░░░▌ Everyday ░'
+            $plain | Should -Match '░░░▌ Repo Setup ░'
+            $plain | Should -Match '(?m)^\s+params\s+-Rebase -Merge -Autostash'
+            $plain | Should -Match '(?m)^\s+params\s+-Create -Base'
+        }
+        It 'uses stable plain output when redirected' {
+            [Console]::IsOutputRedirected | Should -BeTrue
+            (_GxTerminalWidth) | Should -Be 120
+            $script:GxColorOn = _GxUseColor
+            $plain = (& { _GxHelp } 6>&1 | Out-String)
+            $plain | Should -Not -Match "$([char]27)\["
+            $plain | Should -Match 'with moved-line colouring'
+        }
         It 'draws the logo from the shared pixel grid (4 rows, half blocks)' {
             $script:GxColorOn = $false
             $b = @(_GxBanner)
@@ -1337,9 +1856,52 @@ Describe 'gx' {
         It '-Json prints parseable JSON and implies -Quiet' {
             New-Linked 'sc3' | Out-Null
             $j = gx status -Json
+            $j | Should -Not -Match "$([char]27)\["
             $o = $j | ConvertFrom-Json
             $o.Mode | Should -Be 'Status'
             $o.Ok | Should -BeTrue
+        }
+        It '-Json uses jq when it is available' {
+            New-Linked 'sc-jq' | Out-Null
+            Mock _GxFindJq { '/test/jq' }
+            Mock _GxInvokeJq {
+                param($Path, $Json)
+                [pscustomobject]@{ Ok = $true; Text = $Json }
+            }
+            $o = gx status -Json | ConvertFrom-Json
+            $o.Ok | Should -BeTrue
+            Should -Invoke _GxFindJq -Exactly 1
+            Should -Invoke _GxInvokeJq -Exactly 1 -ParameterFilter { $Path -eq '/test/jq' }
+        }
+        It '-Json falls back when jq fails' {
+            New-Linked 'sc-jq-fail' | Out-Null
+            Mock _GxFindJq { '/test/jq' }
+            Mock _GxInvokeJq { [pscustomobject]@{ Ok = $false; Text = $null } }
+            $o = gx status -Json | ConvertFrom-Json
+            $o.Ok | Should -BeTrue
+        }
+        It '-Json skips jq invocation when it is unavailable' {
+            New-Linked 'sc-no-jq' | Out-Null
+            Mock _GxFindJq { $null }
+            Mock _GxInvokeJq { throw 'must not run' }
+            $o = gx status -Json | ConvertFrom-Json
+            $o.Ok | Should -BeTrue
+            Should -Invoke _GxInvokeJq -Exactly 0
+        }
+        It 'keeps missing values plain in rows and highlights them for the host' {
+            $script:GxRows = [System.Collections.Generic.List[object]]::new()
+            $script:GxQuiet = $false
+            $script:GxOk = $true
+            $script:GxColorOn = $true
+            try {
+                $hostText = ((& { _GxRow 'warn' 'auth' 'env ($TOKEN) NOT SET in this session' } 6>&1) | ForEach-Object { $_.MessageData.ToString() }) -join "`n"
+                $hostText | Should -Match "$([char]27)\[38;5;$($script:GxConfig.Palette.warn)mNOT SET$([char]27)\[0m"
+                $script:GxRows[0].Value | Should -Be 'env ($TOKEN) NOT SET in this session'
+                $script:GxRows[0].Value | Should -Not -Match "$([char]27)\["
+            } finally {
+                $script:GxColorOn = $false
+                $script:GxQuiet = $false
+            }
         }
         It '-Json is refused for log and diff' {
             New-Linked 'sc4' | Out-Null
@@ -1372,21 +1934,63 @@ Describe 'gx' {
             New-Linked 'tc2' | Out-Null
             git branch -q feat/completion
             (_GxCompleteBranches 'feat/c' | ForEach-Object CompletionText) | Should -Contain 'feat/completion'
+            (TabExpansion2 -inputScript 'gx rebase feat/c' -cursorColumn 16).CompletionMatches.CompletionText | Should -Contain 'feat/completion'
         }
         It 'completes the mode through the registered completer' {
             $c = TabExpansion2 -inputScript 'gx sw' -cursorColumn 5
             ($c.CompletionMatches | ForEach-Object CompletionText) | Should -Contain 'Switch'
         }
+        It 'completes script parameters and ValidateSet values without loading gx first' {
+            $output = & $script:Pwsh -NoLogo -NoProfile -Command @"
+Set-Location '$((Split-Path $script:GxFile -Parent) -replace "'", "''")'
+function Complete-Line([string]`$Line) { (TabExpansion2 `$Line `$Line.Length).CompletionMatches.CompletionText -join ',' }
+Complete-Line './gx.ps1 -Mo'
+Complete-Line './gx.ps1 sw'
+Complete-Line './gx.ps1 setup -TokenStorage '
+"@
+            $output[0] | Should -Match '(^|,)-Mode(,|$)'
+            $output[1] | Should -Match '(^|,)Switch(,|$)'
+            $output[2] | Should -Match '(^|,)Env(,|$)'
+        }
+        It 'keeps the script and function parameter surfaces in sync' {
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:GxFile, [ref]$tokens, [ref]$errors)
+            $errors | Should -BeNullOrEmpty
+            $functionAst = $ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'gx'
+            }, $true)
+
+            @($ast.ParamBlock.Parameters.Name.VariablePath.UserPath) |
+                Should -Be @($functionAst.Body.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        }
+        It 'reuses gx completion for both direct launchers after gx is loaded' {
+            foreach ($line in './gx.ps1 sw', './gx sw') {
+                $matches = (TabExpansion2 -InputScript $line -CursorColumn $line.Length).CompletionMatches.CompletionText
+                $matches | Should -Contain 'Switch'
+            }
+            foreach ($line in './gx.ps1 setup -Server ', './gx setup -Server ') {
+                $matches = (TabExpansion2 -InputScript $line -CursorColumn $line.Length).CompletionMatches.CompletionText
+                $matches | Should -Contain 'gitlab.com'
+            }
+        }
     }
 
     Describe 'running the file directly' {
         BeforeAll {
-            $script:Pwsh = (Get-Process -Id $PID).Path
             $script:Run = { param([string[]]$A) & $script:Pwsh -NoLogo -NoProfile -File $script:GxFile @A 2>&1 }
         }
         It './gx.ps1 <args> runs one command, in the current repo' {
             New-Linked 'run1' | Out-Null
             $o = (& $script:Run @('status')) -join "`n"
+            $LASTEXITCODE | Should -Be 0
+            $o | Should -Match 'gx\s+status'
+            $o | Should -Match 'working tree clean'
+        }
+        It './gx <args> forwards to gx.ps1 and propagates success' -Skip:$IsWindows {
+            New-Linked 'run-launcher' | Out-Null
+            $o = (& $script:GxLauncher status) -join "`n"
             $LASTEXITCODE | Should -Be 0
             $o | Should -Match 'gx\s+status'
             $o | Should -Match 'working tree clean'
@@ -1397,6 +2001,15 @@ Describe 'gx' {
             & $script:Run @('commit', 'fix', 'the', 'parser', 'bug', '-Type', 'fix', '-AddAll') | Out-Null
             $LASTEXITCODE | Should -Be 0
             (git log -1 --format=%s) | Should -Be 'fix: fix the parser bug'
+        }
+        It 'stages positional paths when the single-file script is executed directly' {
+            New-TestRepo 'run-add' | Out-Null
+            Set-Content one.txt 'one'
+            Set-Content 'two words.txt' 'two'
+            & $script:Run @('add', 'one.txt', 'two words.txt', '-Quiet') | Out-Null
+            $LASTEXITCODE | Should -Be 0
+            @(git diff --cached --name-only) | Should -Be @('one.txt', 'two words.txt')
+            (git rev-list --all --count) | Should -Be '0'
         }
         It 'propagates the exit code (0 on success, 1 on failure)' {
             New-TestRepo 'run3' -Commit | Out-Null
@@ -1425,6 +2038,24 @@ Describe 'gx' {
             $c.CmdletBinding | Should -BeTrue
             $c.Parameters.Keys | Should -Contain 'Verbose'
             $c.Parameters.Keys | Should -Contain 'ErrorAction'
+        }
+    }
+
+    Describe 'ShellDock Git integration' {
+        It 'preserves commit failures, stderr and trace data without adding JSON noise' {
+            New-TestRepo 'dock-hook' -Commit | Out-Null
+            Set-Content file.txt 'pending'
+            $hook = Join-Path (Get-Location).Path '.git/hooks/pre-commit'
+            [IO.File]::WriteAllText($hook, "#!/bin/sh`necho hook-refused >&2`nexit 1`n", [Text.UTF8Encoding]::new($false))
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($hook, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute) }
+            $json = gx commit -Message 'chore: hook failure' -AddAll -Json -CommandTrace
+            $r = $json | ConvertFrom-Json
+            $r.Ok | Should -BeFalse
+            @($r.Rows | Where-Object { $_.Value -eq 'hook-refused' }).Count | Should -Be 1
+            $commitTrace = @($r.Data.trace | Where-Object { $_.Command -like 'git commit *' })
+            $commitTrace.Count | Should -Be 1
+            $commitTrace[0].ExitCode | Should -Be 1
+            (git log -1 --format=%s) | Should -Be 'chore: seed'
         }
     }
 
@@ -2128,6 +2759,76 @@ Describe 'gx' {
 
     # =====================================================================================
     Describe 'branch and switch edge cases' {
+        It 'builds picker choices from local and remote-only branches' {
+            New-Linked 'sw-choices' | Out-Null
+            git branch feat/local
+            git branch feat/remote
+            git push -q origin feat/remote 2>&1 | Out-Null
+            git branch -D feat/remote 2>&1 | Out-Null
+            $choices = @(_GxSwitchChoices 'origin')
+            ($choices | Where-Object Target -eq 'main').Current | Should -BeTrue
+            ($choices | Where-Object Target -eq 'feat/local').Scope | Should -Be 'local'
+            ($choices | Where-Object Target -eq 'feat/remote').Scope | Should -Be 'remote'
+        }
+
+        It 'navigates and filters the dependency-free picker' {
+            $choices = @(
+                [pscustomobject]@{ Target = 'main'; Scope = 'local'; Current = $true; Subject = 'main branch' },
+                [pscustomobject]@{ Target = 'feat/cache'; Scope = 'local'; Current = $false; Subject = 'cache work' }
+            )
+            $script:PickerKeys = [System.Collections.Generic.Queue[object]]::new()
+            $script:PickerKeys.Enqueue([pscustomobject]@{ Key = 'F'; KeyChar = [char]'f' })
+            $script:PickerKeys.Enqueue([pscustomobject]@{ Key = 'Enter'; KeyChar = [char]0 })
+            Mock _GxReadPickerKey { $script:PickerKeys.Dequeue() }
+            Mock _GxRenderBranchPicker { 3 }
+            Mock _GxClearBranchPicker {}
+            _GxSelectBranch $choices | Should -Be 'feat/cache'
+            Should -Invoke _GxRenderBranchPicker -Times 2 -Exactly
+        }
+
+        It 'uses the picker when no branch is supplied in an interactive terminal' {
+            New-Linked 'sw-picker' | Out-Null
+            git branch feat/picked
+            Mock _GxCanPrompt { $true }
+            Mock _GxSwitchChoices { @([pscustomobject]@{ Target = 'feat/picked'; Scope = 'local'; Current = $false; Subject = '' }) }
+            Mock _GxSelectBranch { 'feat/picked' }
+            gx switch | Out-Null
+            $LASTEXITCODE | Should -Be 0
+            (git branch --show-current) | Should -Be 'feat/picked'
+            Should -Invoke _GxSelectBranch -Exactly 1
+        }
+
+        It 'treats picker cancellation as a successful no-op' {
+            New-Linked 'sw-cancel' | Out-Null
+            Mock _GxCanPrompt { $true }
+            Mock _GxSwitchChoices { @([pscustomobject]@{ Target = 'main'; Scope = 'local'; Current = $true; Subject = '' }) }
+            Mock _GxSelectBranch { $null }
+            $output = (& { gx switch } 6>&1 | Out-String)
+            $LASTEXITCODE | Should -Be 0
+            $output | Should -Match 'cancelled'
+            (git branch --show-current) | Should -Be 'main'
+        }
+
+        It 'preserves dry-run behavior after an interactive selection' {
+            New-Linked 'sw-dry-picker' | Out-Null
+            git branch feat/dry-picked
+            Mock _GxCanPrompt { $true }
+            Mock _GxSwitchChoices { @([pscustomobject]@{ Target = 'feat/dry-picked'; Scope = 'local'; Current = $false; Subject = '' }) }
+            Mock _GxSelectBranch { 'feat/dry-picked' }
+            $output = (& { gx switch -DryRun } 6>&1 | Out-String)
+            $LASTEXITCODE | Should -Be 0
+            $output | Should -Match 'switch feat/dry-picked'
+            (git branch --show-current) | Should -Be 'main'
+        }
+
+        It 'never prompts without a branch in scripted output modes' {
+            New-Linked 'sw-scripted' | Out-Null
+            Mock _GxSelectBranch { throw 'must not prompt' }
+            (gx switch -Quiet -PassThru).Ok | Should -BeFalse
+            (gx switch -Json | ConvertFrom-Json).Ok | Should -BeFalse
+            Should -Invoke _GxSelectBranch -Exactly 0
+        }
+
         It 'branch -All includes remote-tracking refs' {
             New-Linked 'ba-all' | Out-Null
             $r = gx branch -All -PassThru -Quiet
@@ -2164,6 +2865,28 @@ Describe 'gx' {
             git tag v1
             (gx switch feat/based -Create -Base v1 -PassThru -Quiet).Ok | Should -BeTrue
             (git branch --show-current) | Should -Be 'feat/based'
+        }
+        It 'keeps git safety behavior when local changes would be overwritten' {
+            New-Linked 'sw-dirty' | Out-Null
+            git switch -q -c other
+            Set-Content readme.md 'other branch'; git commit -qam 'other change'
+            git switch -q main
+            Set-Content readme.md 'local uncommitted change'
+            $result = gx switch other -PassThru -Quiet
+            $result.Ok | Should -BeFalse
+            AnyText $result 'local changes would be overwritten' | Should -BeTrue
+            (git branch --show-current) | Should -Be 'main'
+        }
+        It 'keeps branch rows within a narrow terminal width' {
+            New-Linked 'ba-narrow' | Out-Null
+            git switch -q -c 'feature/a-very-long-branch-name-for-layout-testing'
+            Add-Commit 'long.txt' '1' 'feat: a deliberately long subject for terminal width testing'
+            Mock _GxTerminalWidth { 60 }
+            $output = @(& { gx branch } 6>&1 | ForEach-Object { $_.MessageData.ToString() })
+            $branchLine = $output | Where-Object { $_ -match '^\s{2}\* feature/' } | Select-Object -First 1
+            $branchLine | Should -Not -BeNullOrEmpty
+            (Get-ClapVisibleLength $branchLine) | Should -BeLessOrEqual 60
+            $branchLine | Should -Match '~'
         }
     }
 
