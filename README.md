@@ -14,32 +14,34 @@
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Command reference](#command-reference)
-  - [everyday](#everyday)
-    - [`gx status`](#gx-status)
-    - [`gx add`](#gx-add)
-    - [`gx commit`](#gx-commit)
-    - [`gx push`](#gx-push)
-    - [`gx pull`](#gx-pull)
-    - [`gx sync`](#gx-sync)
-    - [`gx branch`](#gx-branch)
-    - [`gx switch`](#gx-switch)
-    - [`gx undo`](#gx-undo)
-    - [`gx tag`](#gx-tag)
-    - [`gx log`](#gx-log)
-    - [`gx diff`](#gx-diff)
-    - [`gx open`](#gx-open)
-  - [repo setup](#repo-setup)
-    - [`gx setup`](#gx-setup)
-    - [`gx init`](#gx-init)
-    - [`gx clone`](#gx-clone)
-    - [`gx mirror`](#gx-mirror)
-    - [`gx ignore`](#gx-ignore)
-    - [`gx config`](#gx-config)
-  - [diagnose](#diagnose)
-    - [`gx check`](#gx-check)
-    - [`gx doctor`](#gx-doctor)
-    - [`gx sweep`](#gx-sweep)
-    - [`gx semver`](#gx-semver)
+    - [everyday](#everyday)
+        - [`gx status`](#gx-status)
+        - [`gx commit`](#gx-commit)
+        - [`gx push`](#gx-push)
+        - [`gx pull`](#gx-pull)
+        - [`gx sync`](#gx-sync)
+        - [`gx branch`](#gx-branch)
+        - [`gx switch`](#gx-switch)
+        - [`gx rebase`](#gx-rebase)
+        - [`gx stage`](#gx-stage)
+        - [`gx unstage`](#gx-unstage)
+        - [`gx undo`](#gx-undo)
+        - [`gx tag`](#gx-tag)
+        - [`gx log`](#gx-log)
+        - [`gx diff`](#gx-diff)
+        - [`gx open`](#gx-open)
+    - [repo setup](#repo-setup)
+        - [`gx setup`](#gx-setup)
+        - [`gx init`](#gx-init)
+        - [`gx clone`](#gx-clone)
+        - [`gx mirror`](#gx-mirror)
+        - [`gx ignore`](#gx-ignore)
+        - [`gx config`](#gx-config)
+    - [diagnose](#diagnose)
+        - [`gx check`](#gx-check)
+        - [`gx doctor`](#gx-doctor)
+        - [`gx sweep`](#gx-sweep)
+        - [`gx semver`](#gx-semver)
 - [Command trace](#command-trace)
 - [How tokens are handled](#how-tokens-are-handled)
 - [Safety features](#safety-features)
@@ -65,7 +67,7 @@
 - **Tokens stay in environment variables by default.** A host-scoped credential helper reads them at push/pull time; plaintext URL storage requires explicit opt-in.
 - **Safe by default.** Fast-forward-only pulls, `--force-with-lease` (never bare `--force`), a secrets/size guard on
   every commit, protected default branch, `-DryRun` on anything that changes state.
-- **Scriptable.** Every mode sets `$LASTEXITCODE` and can return an object (`-PassThru`) or JSON (`-Json`).
+- **Scriptable.** Every mode sets `$LASTEXITCODE` and can return an object (`-PassThru`) or JSON (`-Json`). If `jq` is available, gx uses it to validate and format JSON; otherwise it returns PowerShell's JSON unchanged.
 - **Direct script or module.** Run/dot-source `gx.ps1`, or import `gx.psd1` to expose only the public `gx` command. PowerShell 7.3+, git 2.28+ recommended.
 
 ```
@@ -83,7 +85,7 @@
 ```
 ❯ ./gx help || im gx; gx help || iex https://raw.githubusercontent.com/sgkens/gx/main/gx.ps1 help;
 
-  ▄▀▀▀█ ▀▄ ▄▀     gx v1.0.0
+  ▄▀▀▀█ ▀▄ ▄▀     Git Executor (GX) v0.0.0 prerelease
   █   █  ▄▀▄  ▄▄  personal git QOL
    ▀▀▀█ ▀   ▀ ▀▀  git-only | no API calls | PowerShell 7.3+
    ▀▀▀            config: /home/sgkens/.gx.json  (none)
@@ -91,41 +93,63 @@
  usage   gx [mode] [words...] [options]     gx <mode> -Help  |  gx help <mode>
          quote a message that contains  # ; | & > < $  or a word starting with -   (PowerShell would eat it)
 
- everyday
+ ░░░▌ Everyday ░
    status   branch, ahead/behind, changes, stash, in-progress state, remotes and auth
-   add      stage selected files or all changes without committing
+             params  -Detail
    commit   git commit -m with a conventional prefix, a staged summary and a secrets guard
+             params  -Type -Scope -Body -Add -AddAll -Tracked -Amend -Push -Force -NoVerify -Signoff -NoGuard
    push     push with a commit preview; sets the upstream on a new branch
+             params  -Mr -CiSkip -Open -Tags -Force -Remote
    pull     fast-forward only by default; says what to do when the branches diverged
+             params  -Rebase -Merge -Autostash
    sync     fetch --prune, fast-forward if that is safe, report where you stand
+             params  -All -Push -Rebase -Merge
    branch   list branches with tracking state; clean up merged or gone ones
-   switch   switch branches, tracking a remote branch or creating a new one
+             params  -All -Clean -Delete -Force
+   switch   pick or switch branches, tracking a remote branch or creating a new one
+             params  -Create -Base
    undo     soft-undo the last commit(s): changes stay staged
+             params  -Count -Force
    tag      list tags and unreleased commits, create annotated tags, bump semver
+             params  -Bump -Message -Lightweight -Base -Push -Force -Count
    log      graph log in the same palette; Compact or Full metadata
+             params  -Detail -All -Branch -Count -Author -Me -Grep -Since -Until -Merges -NoMerges -Stat -NoPager
    diff     working tree, staged, branch-vs-main or ref-vs-ref, with moved-line colouring
+             params  -Staged -Main -Base -To -Stat -NameOnly -Word -NoPager
    open     open the repo, merge requests, issues, pipelines, a branch, a file... in the browser
+             params  -Print -Remote -OriginType
 
- repo setup
+ ░░░▌ Repo Setup ░
    setup    origin (or another remote), push url and the env-reading credential helper
+             params  -OriginType -Server -Name -Namespace -User -Remote -TokenVar -TokenStorage -PushUrl -Push -Force
    init     git init, scaffolds, optional first commit, then setup
+             params  -Message -Push -Gitignore -NoIgnore -Readme -License -Branch
    clone    clone with the env token, then run setup and cd into it
+             params  -Dir -NoCd -Server -OriginType -TokenVar
    mirror   add or refresh a separate "mirror" remote and optionally push to it
+             params  -Push -All -MirrorRefs
    ignore   .gitignore templates, added idempotently
+             params  -List
    config   show the effective configuration, or write an example config file
+             params  -Create
 
- diagnose
+ ░░░▌ Diagnose ░
    check    does the token work, and does the repo exist? (git ls-remote, no API)
+             params  -Remote
    doctor   versions, identity, credential helpers, token variables and a real credential test
+             params  -Fix -Force
    sweep    one table for many repos; finds and migrates plaintext tokens
+             params  -Depth -Detail -Fix -TokenVar -Force
+   semver   next SemVer calculated from Conventional Commits in Git history
+             params  -MinorTypes -PatchTypes
 
- everywhere
+ ░░░▌ Everywhere ░
    -DryRun    print the git commands that would change something instead of running them
    -Force     override a safety stop (the specific meaning is listed per mode)
    -Quiet     no output (the exit code and -PassThru still work)
    -CommandTrace show every git command the action runs, with exit code and timing (also in -PassThru Data.trace)
    -PassThru  also return a result object: Mode, Ok, ExitCode, Rows, Data
-   -Json      print that result as JSON (implies -Quiet; not for log/diff)
+   -Json      print JSON, formatted through jq when available (implies -Quiet; not for log/diff)
    -Help      this screen, or gx <mode> -Help for one mode
 
  env   GITLAB_API_KEY  GITHUB_API_KEY  GITEA_API_KEY  GX_USER  GX_NAMESPACE  GX_CONFIG  GX_TRACE_LOG  NO_COLOR
@@ -139,11 +163,11 @@ On Windows, Git for Windows supplies the `sh` that git uses to run the credentia
 
 `gx` can be loaded as a module or used directly:
 
-|                                      | Command                                       | What happens                                                                                                                                                                  |
-| ------------------------------------ | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Module** (recommended for sharing) | `Import-Module ./gx.psd1`                     | exports `gx`; implementation helpers remain private                                                                                                                           |
-| **Dot-source** (single-file use)     | `. ./gx.ps1` then `gx status`                 | defines the `gx` command and implementation helpers in your session                                                                                                           |
-| **Run it**                           | `./gx.ps1 status`, `pwsh -File gx.ps1 status` | runs one command and exits; the exit code is passed through. Nothing stays defined, so there is no tab completion and no `gx` afterwards. With no arguments it shows the help |
+|                                      | Command                                                             | What happens                                                                                                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Module** (recommended for sharing) | `Import-Module ./gx.psd1`                                           | exports `gx`; implementation helpers remain private                                                                                                            |
+| **Dot-source** (single-file use)     | `. ./gx.ps1` then `gx status`                                       | defines the `gx` command and implementation helpers in your session                                                                                            |
+| **Run it**                           | `./gx status` (Unix), `./gx.ps1 status`, `pwsh -File gx.ps1 status` | runs one command and exits; the exit code is passed through. Nothing stays defined and no `gx` command remains afterwards. With no arguments it shows the help |
 
 > Running the file **cannot** define the command in your session: PowerShell discards what a script defines when it ends.
 > That is why the file has to be _dot-sourced_ (note the leading `. `) to get `gx`.
@@ -217,7 +241,7 @@ Every mode also accepts the common options:
 | `-Quiet`        | no output (the exit code and `-PassThru` still work)                                                                                      |
 | `-CommandTrace` | show every git command the action runs, with exit code and timing (also in `-PassThru` `Data.trace`); see [Command trace](#command-trace) |
 | `-PassThru`     | also return a result object: Mode, Ok, ExitCode, Rows, Data                                                                               |
-| `-Json`         | print that result as JSON (implies `-Quiet`; not for log/diff)                                                                            |
+| `-Json`         | print JSON, formatted through `jq` when available (implies `-Quiet`; not for log/diff)                                                    |
 | `-Help`         | the overview, or `gx <mode> -Help` for one mode                                                                                           |
 
 > **Quoting:** words after the mode are the message/paths, so `gx commit fix the bug` needs no quotes. Quote a message
@@ -400,11 +424,14 @@ gx branch -Delete wip/x -Force
 
 #### `gx switch`
 
-Switch branches, tracking a remote branch or creating a new one.
+Pick from local and remote branches, switch directly by name, or create a new branch.
 
 ```powershell
+gx switch
 gx switch <branch> [-Create [-Base <ref>]]
 ```
+
+With no branch argument, an interactive terminal opens the dependency-free selector. Type to filter, use Up/Down to move, Enter to switch, or Escape to cancel. Scripts, CI, redirected output, `-Quiet`, `-PassThru`, and `-Json` never prompt and must provide a branch name.
 
 | Option      |                                      |
 | ----------- | ------------------------------------ |
@@ -412,9 +439,77 @@ gx switch <branch> [-Create [-Base <ref>]]
 | `-Base ref` | start point for -Create              |
 
 ```powershell
+gx switch
 gx switch main
 gx switch feat/cache -Create
 gx switch hotfix -Create -Base v1.2.0
+```
+
+#### `gx rebase`
+
+Replay the current branch onto the repository default branch or an explicit base, with guided conflict recovery.
+
+```powershell
+gx rebase [base] [-Autostash] [-Interactive] [-UpdateRefs]
+gx rebase -Continue | -Abort | -Skip
+```
+
+| Option                         |                                                                 |
+| ------------------------------ | --------------------------------------------------------------- |
+| `-Autostash`                   | stash tracked changes around the rebase and restore them        |
+| `-Interactive`                 | open Git's native rebase todo editor on an interactive terminal |
+| `-UpdateRefs`                  | move other local refs that point into rewritten commits         |
+| `-Continue`, `-Skip`, `-Abort` | continue after resolving, omit the current commit, or restore   |
+
+```powershell
+gx rebase
+gx rebase origin/main -Autostash
+gx rebase -Interactive main
+gx rebase -Continue
+```
+
+Conflicts list each affected file and the exact continue, skip, and abort commands. Interactive rebases require a real terminal. For scripted `-Continue`, explicitly set `GIT_EDITOR` to a non-interactive command.
+
+#### `gx stage`
+
+Add selected changes to the index and show what remains.
+
+```powershell
+gx stage <paths...>
+gx stage -All | -Tracked | -Patch
+gx stage <paths...> -Intent
+```
+
+| Option     |                                                              |
+| ---------- | ------------------------------------------------------------ |
+| `-All`     | stage tracked and untracked changes                          |
+| `-Tracked` | stage modifications and deletions of tracked files           |
+| `-Patch`   | select hunks through Git's native interactive terminal UI    |
+| `-Intent`  | make untracked paths visible to diff without staging content |
+
+```powershell
+gx stage src/app.ps1 tests/app.Tests.ps1
+gx stage -All
+gx stage new-file.ps1 -Intent
+gx stage src/app.ps1 -Patch
+```
+
+Paths are passed to Git after `--`, so filenames beginning with a dash remain literal. `-Patch` requires an interactive terminal, except when previewed with `-DryRun`.
+
+#### `gx unstage`
+
+Remove paths from the index without changing their worktree content.
+
+```powershell
+gx unstage [paths...] [-Patch]
+```
+
+With no paths, the complete index is unstaged. The command also works before the first commit, when `HEAD` does not exist.
+
+```powershell
+gx unstage
+gx unstage src/app.ps1
+gx unstage src/app.ps1 -Patch
 ```
 
 #### `gx undo`
@@ -984,17 +1079,17 @@ Built-in `.gitignore` templates: `secrets os editor powershell node python dotne
 
 ## Environment variables
 
-| Variable                                            | Purpose                                                   |
-| --------------------------------------------------- | --------------------------------------------------------- |
-| `GITLAB_API_KEY`, `GITHUB_API_KEY`, `GITEA_API_KEY` | tokens, read by the credential helper at use time         |
-| `GX_USER`, `GX_NAMESPACE`                           | override `user` / `namespace`                             |
-| `GX_CONFIG`                                         | path of the config file                                   |
-| `GX_TRACE_LOG`                                      | file that `-CommandTrace` appends every traced command to |
-| `NO_COLOR`                                          | disable colour                                            |
+| Variable                                                | Purpose                                                   |
+| ------------------------------------------------------- | --------------------------------------------------------- |
+| `GITLAB_API_KEY`, `GITHUB_A .. PI_KEY`, `GITEA_API_KEY` | tokens, read by the credential helper at use time         |
+| `GX_USER`, `GX_NAMESPACE`                               | override `user` / `namespace`                             |
+| `GX_CONFIG`                                             | path of the config file                                   |
+| `GX_TRACE_LOG`                                          | file that `-CommandTrace` appends every traced command to |
+| `NO_COLOR`                                              | disable colour                                            |
 
 ## Tab completion
 
-Registered when the file is **dot-sourced** (running `./gx.ps1 ...` defines nothing in your session, so there is nothing to complete).
+`./gx.ps1` exposes its parameter metadata directly, so parameter names and `ValidateSet` values complete even in a clean session. Importing the module or dot-sourcing `gx.ps1` also registers the repository/config-aware completers for all three invocation forms: `gx`, `./gx.ps1`, and the extensionless `./gx` launcher. PowerShell treats `./gx` as a native command, so its completion registration requires the module or dot-sourced script to be loaded first.
 
 - **Parameter names** complete natively: `gx commit fix -Ty<Tab>` -> `-Type`, `gx -Comm<Tab>` -> `-CommandTrace`. There are ~95 parameters, so
   press `Ctrl+Space` (PSReadLine's menu; that is its default binding on Windows) to browse them, or run `Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete` to make Tab open the menu on any platform.
@@ -1028,12 +1123,12 @@ Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser    # once
 Invoke-Pester ./tests -Output Detailed
 ```
 
-250 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
+361 tests. Everything runs in a throw-away sandbox: a temp folder, a private global git config (`GIT_CONFIG_GLOBAL`), bare
 repositories standing in for GitLab/GitHub through `url.<path>.insteadOf`, and fake tokens. **No network, and your real git
 config and `~/.gx.json` are never read or written.** Coverage: URL parsing, masking, error translation, config loading,
 the credential helper (a real `git credential fill`, with the variable set and unset), `setup` (idempotence, migration,
 storage modes, injection validation, second remotes, identity), `init` scaffolds, `ignore`, `commit` and every guard rule,
-`status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`undo`, `tag` (bump, push, delete),
+`status`, `push`/`pull`/`sync` including divergence and rejected pushes, `branch`/`switch`/`rebase`/`stage`/`unstage`/`undo`, `tag` (bump, push, delete),
 `open` URL building per provider, `sweep` including `-Fix`, `log`/`diff`, `clone`/`mirror`, `check`/`doctor`, the help system
 (every mode documented, colour on and off), the scripting surface, running the file directly (argument forwarding, exit codes), command tracing (masking, log file, reset), and parameter completion.
 

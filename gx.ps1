@@ -22,7 +22,7 @@
       Add      stage selected paths, all changes, or tracked changes without committing
       Commit   git commit -m wrapper: conventional prefix, staged summary, -Push
       Push / Pull / Sync   push (-Mr -Open -Force), ff-only pull, fetch --prune + fast-forward
-      Branch / Switch / Undo   list & clean branches, switch/create, soft-undo commits
+      Branch / Switch / Rebase / Stage / Unstage / Undo   daily branch and index workflows
       Log      graph log, Compact or Full
       Diff     file / staged / branch-vs-main
       Tag / Open   list/create/bump tags; open MR, issues, CI, files in the browser
@@ -51,6 +51,119 @@
 
 using namespace System.Text.RegularExpressions
 using namespace System.Collections.Generic
+
+# Keep this script-level parameter block in sync with the public gx function.
+# PowerShell reads it without executing the file, which gives ./gx.ps1 native
+# parameter-name and ValidateSet completion as well as normal parameter binding.
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet('Status', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
+                 'Branch', 'Switch', 'Rebase', 'Stage', 'Unstage', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
+                 'Check', 'Doctor', 'Sweep', 'Semver', 'Help')]
+    [string]$Mode,
+
+    [Parameter(Position = 1, ValueFromRemainingArguments)]
+    [string[]]$Target,
+
+    [switch]$Help,
+
+    [ValidateSet('gitlab', 'github', 'gitea', 'custom')]
+    [string]$OriginType = 'gitlab',
+    [string]$Server,
+    [string]$Name,
+    [string]$Namespace,
+    [string]$User,
+    [string]$TokenVar,
+    [ValidateSet('Env', 'Url', 'Manager')]
+    [string]$TokenStorage = 'Env',
+    [string]$PushUrl,
+    [string]$Branch,
+    [switch]$Push,
+    [switch]$DryRun,
+    [switch]$Force,
+
+    [switch]$PassThru,
+    [switch]$Json,
+    [switch]$Quiet,
+    [switch]$CommandTrace,
+
+    [ValidateSet('Compact', 'Full')]
+    [string]$Detail = 'Compact',
+    [switch]$All,
+    [int]$Count = -1,
+    [string]$Author,
+    [switch]$Me,
+    [string]$Since,
+    [string]$Until,
+    [string]$Grep,
+    [switch]$Merges,
+    [switch]$NoMerges,
+    [string]$File,
+    [switch]$Stat,
+
+    [string]$Base,
+    [string]$To,
+    [switch]$Main,
+    [switch]$Staged,
+    [switch]$NameOnly,
+    [switch]$Word,
+    [switch]$NoPager,
+
+    [string]$Message,
+    [string]$Body,
+    [string]$Type,
+    [string]$Scope,
+    [string[]]$Add,
+    [switch]$AddAll,
+    [switch]$Tracked,
+    [switch]$Amend,
+    [switch]$NoVerify,
+    [switch]$Signoff,
+    [switch]$NoGuard,
+
+    [string]$Remote,
+    [switch]$Tags,
+    [switch]$Mr,
+    [switch]$CiSkip,
+    [switch]$Open,
+    [switch]$Rebase,
+    [switch]$Merge,
+    [switch]$Autostash,
+    [switch]$Continue,
+    [switch]$Abort,
+    [switch]$Skip,
+    [switch]$Interactive,
+    [switch]$UpdateRefs,
+    [switch]$Patch,
+    [switch]$Intent,
+    [ValidateSet('major', 'minor', 'patch')]
+    [string]$Bump,
+    [switch]$Lightweight,
+
+    [switch]$Create,
+    [switch]$Clean,
+    [string]$Delete,
+    [switch]$Print,
+    [switch]$List,
+
+    [switch]$Fix,
+    [int]$Depth = -1,
+
+    [string[]]$Gitignore,
+    [switch]$NoIgnore,
+    [switch]$Readme,
+    [string]$License,
+
+    [string]$Dir,
+    [switch]$NoCd,
+
+    [string]$MirrorUrl,
+    [switch]$MirrorRefs,
+
+    [string[]]$MinorTypes,
+    [string[]]$PatchTypes
+)
 
 # =====================================================================
 #  CONFIG - edit this block to customise
@@ -684,34 +797,34 @@ function Get-SemVer {
 
 }
 
-<#
- _____                   _
-|_   _|___ _ _ _ __ __ _| |
-  | | / -_) '_| '_ Y _` | |
-  |_| \___|_| | .__|__,_|_|.ps1
-              |_|
-___________________________________________________.
-Scope: ascii color Interpolation and SGR Generation
-Repo Path: phellams-utils/helpers/color/terpal.ps1
-----------.
-DESCRPTION
-----------.
-Returns A Curred Generated Hastable function with predefined ascii color set to applys Propties, and
-functions to appy or parse ascii pallete and RGB True Color
-- Returned HashTable has two objects
-- parseColor < function - Parses RGB Array @()|string array into SGR string
-- paletteObj < [pscustomobject]
-    - Functions:
-    - Apply(): applies the color to the text takes, string and Ascii SGR
-    - GetFillColor(): < 2 modes Conditional and Gradient
-    - GetStaticColor(): Returns Static color SGR
-#>
-# NOTE: Extact this into phellams utils color
-# EXAMPLES:
-# - $terpal = Get-TerminalPalette -ColorPalette @{fill=@(255,10,100)} -ColorMode solid
-# - $terpal.apply.invoke('this value', $terpal.GetFillColor.invoke(10,255))
-# ------------------------------------------------------------------------------
 function Get-TerminalPalette {
+    <#
+     _____                   _
+    |_   _|___ _ _ _ __ __ _| |
+      | | / -_) '_| '_ Y _` | |
+      |_| \___|_| | .__|__,_|_|
+                  |_|
+    ___________________________________________________.
+    Scope: ascii color Interpolation and SGR Generation
+    Repo Path: phellams-utils/helpers/color/terpal.ps1
+    ----------.
+    DESCRPTION
+    ----------.
+    Returns A Curred Generated Hastable function with predefined ascii color set to applys Propties, and
+    functions to appy or parse ascii pallete and RGB True Color
+    - Returned HashTable has two objects
+    - parseColor < function - Parses RGB Array @()|string array into SGR string
+    - paletteObj < [pscustomobject]
+        - Functions:
+        - Apply(): applies the color to the text takes, string and Ascii SGR
+        - GetFillColor(): < 2 modes Conditional and Gradient
+        - GetStaticColor(): Returns Static color SGR
+    #>
+    # NOTE: Extact this into phellams utils color
+    # EXAMPLES:
+    # - $terpal = Get-TerminalPalette -ColorPalette @{fill=@(255,10,100)} -ColorMode solid
+    # - $terpal.apply.invoke('this value', $terpal.GetFillColor.invoke(10,255))
+    # ------------------------------------------------------------------------------
     [cmdletbinding()]
     [alias('terpal')]
     param (
@@ -1466,6 +1579,40 @@ function _GxC {
     return ('{0}[38;5;{1}m{2}{0}[0m' -f [char]27, $Code, $Text)
 }
 
+function _GxItalic {
+    param([string]$Text)
+    if (-not $script:GxColorOn -or [string]::IsNullOrEmpty($Text)) { return $Text }
+    return ('{0}[3m{1}{0}[23m' -f [char]27, $Text)
+}
+
+function _GxTerminalWidth {
+    param([int]$Fallback = 120)
+    if ([Console]::IsOutputRedirected) { return [Math]::Min(240, [Math]::Max(60, $Fallback)) }
+    try {
+        $width = [Console]::WindowWidth
+        if ($width -gt 0) { return [Math]::Min(240, [Math]::Max(60, $width)) }
+    } catch {}
+    return [Math]::Min(240, [Math]::Max(60, $Fallback))
+}
+
+function _GxClipText {
+    param([string]$Text, [int]$Width, [string]$Suffix = '~')
+    if ($Width -le 0) { return '' }
+    if ($null -eq $Text -or $Text.Length -le $Width) { return $Text }
+    if ($Suffix.Length -ge $Width) { return $Suffix.Substring(0, $Width) }
+    return $Text.Substring(0, $Width - $Suffix.Length) + $Suffix
+}
+
+function _GxStyleMissingValue {
+    param([string]$Text)
+    if (-not $script:GxColorOn -or [string]::IsNullOrEmpty($Text)) { return $Text }
+    $warn = $script:GxConfig.Palette.warn
+    return [regex]::Replace($Text, '(?i)(?<!\w)(not set|unset)(?!\w)', {
+        param($Match)
+        _GxC $warn $Match.Value
+    })
+}
+
 function _GxMask {
     param([string]$Text)
     if (-not $Text) { return $Text }
@@ -1491,19 +1638,9 @@ function _GxRow {
         'dry'   { $tag = 'dry ';  $col = $p.mode }
         default { $tag = 'info';  $col = $p.dim }
     }
-    $shown = if ($PSBoundParameters.ContainsKey('DisplayValue')) { _GxMask $DisplayValue } else { $mv }
-    Write-Host (Clap -Strings (' [' + (_GxC $col $tag) + ']'), (_GxC $p.label $Label), $shown -Width 7, 16, 0 -Separator ' ')
-}
-
-function _GxCommitDisplay {
-    param([string]$Text, [switch]$WithDate)
-    $p = $script:GxConfig.Palette
-    $pattern = if ($WithDate) { '^(?<hash>[0-9a-f]{7,40}) (?<subject>.*) (?<date>\([^()]*\))$' }
-               else { '^(?<hash>[0-9a-f]{7,40}) (?<subject>.+)$' }
-    if ($Text -notmatch $pattern) { return (_GxC $p.dim $Text) }
-    $display = (_GxC $p.hash $Matches.hash) + ' ' + (_GxC $p.subject $Matches.subject)
-    if ($WithDate) { $display += ' ' + (_GxC $p.date $Matches.date) }
-    return $display
+    $shownValue = if ($PSBoundParameters.ContainsKey('DisplayValue')) { _GxMask $DisplayValue } else { $mv }
+    $shownValue = _GxStyleMissingValue $shownValue
+    Write-Host (Clap -Strings (' [' + (_GxC $col $tag) + ']'), (_GxC $p.label $Label), $shownValue -Width 7, 16, 0 -Separator ' ')
 }
 
 function _GxLine {
@@ -2605,17 +2742,23 @@ function _GxStatus {
     $p = $script:GxConfig.Palette
     $w = _GxWorkStatus
     $head = if ($w.Head -and $w.Head -ne '(detached)') { $w.Head } else { $null }
-    if (-not $head) { _GxRow 'warn' 'branch' 'detached HEAD' }
+    if (-not $head) {
+        _GxRow 'warn' 'branch' 'detached HEAD' -DisplayValue (_GxC $script:GxConfig.Palette.err 'detached HEAD')
+    }
     elseif ($w.Upstream) {
         $ab = @()
         if ($w.Ahead)  { $ab += "ahead $($w.Ahead)" }
         if ($w.Behind) { $ab += "behind $($w.Behind)" }
         $abTxt = if ($ab.Count) { '  [' + ($ab -join ', ') + ']' } else { '  [in sync]' }
-        $branchDisplay = (_GxC $p.mode $head) + (_GxC $p.dim ' -> ') + (_GxC $p.author $w.Upstream) + (_GxC $p.dim $abTxt)
+        $stateColor = if ($w.Ahead -and $w.Behind) { $script:GxConfig.Palette.err } elseif ($ab.Count) { $script:GxConfig.Palette.warn } else { $script:GxConfig.Palette.ok }
+        $upstreamDisplay = _GxItalic (_GxC $script:GxConfig.Palette.dim $w.Upstream)
+        $stateDisplay = _GxC $stateColor $abTxt.TrimStart()
+        $branchDisplay = "$head $(_GxC $script:GxConfig.Palette.dim '->') $upstreamDisplay  $stateDisplay"
         _GxRow $(if ($w.Behind) { 'warn' } else { 'info' }) 'branch' "$head -> $($w.Upstream)$abTxt" -DisplayValue $branchDisplay
     } else {
-        $branchDisplay = (_GxC $p.mode $head) + (_GxC $p.dim '  (no upstream - gx push sets it)')
-        _GxRow 'info' 'branch' "$head  (no upstream - gx push sets it)" -DisplayValue $branchDisplay
+        $rawBranch = "$head  (no upstream - gx push sets it)"
+        $branchDisplay = "$head  $(_GxC $script:GxConfig.Palette.warn '(no upstream)') $(_GxC $script:GxConfig.Palette.dim '- gx push sets it')"
+        _GxRow 'info' 'branch' $rawBranch -DisplayValue $branchDisplay
     }
 
     $state = _GxRepoState
@@ -2640,9 +2783,13 @@ function _GxStatus {
 
     $lastTxt = $null
     if (_GxRefExists 'HEAD') {
-        $lg = _GxGit @('log', '-1', '--pretty=format:%h %s (%ar)')
-        $lastTxt = $lg.Text
-        _GxRow 'info' 'last commit' $lastTxt -DisplayValue (_GxCommitDisplay $lastTxt -WithDate)
+        $lg = _GxGit @('log', '-1', '--pretty=format:%h%x1f%s%x1f(%ar)')
+        $lastParts = $lg.Text -split ([char]0x1f), 3
+        $lastTxt = $lastParts -join ' '
+        $lastDisplay = if ($lastParts.Count -eq 3) {
+            (_GxC $script:GxConfig.Palette.hash $lastParts[0]) + ' ' + $lastParts[1] + ' ' + (_GxC $script:GxConfig.Palette.dim $lastParts[2])
+        } else { $lastTxt }
+        _GxRow 'info' 'last commit' $lastTxt -DisplayValue $lastDisplay
     }
     _GxRemotes
 
@@ -2810,6 +2957,127 @@ function _GxSync {
 # =====================================================================
 #  BRANCH / SWITCH / UNDO
 # =====================================================================
+function _GxCanPrompt {
+    if ($script:GxNonInteractive -or $env:CI -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { return $false }
+    return [Environment]::UserInteractive
+}
+
+function _GxSwitchChoices {
+    param([string]$Remote = 'origin')
+    $choices = [System.Collections.Generic.List[object]]::new()
+    $localNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $format = '%(refname:short)|%(HEAD)|%(upstream:short)|%(committerdate:relative)|%(subject)'
+
+    $locals = _GxGit @('for-each-ref', '--sort=-committerdate', "--format=$format", 'refs/heads')
+    foreach ($line in $locals.Lines) {
+        if (-not $line.Trim()) { continue }
+        $fields = $line -split '\|', 5
+        [void]$localNames.Add($fields[0])
+        $choices.Add([pscustomobject]@{
+            Target = $fields[0]; Scope = 'local'; Current = ($fields[1].Trim() -eq '*')
+            Upstream = $fields[2]; When = $fields[3]; Subject = $fields[4]
+        })
+    }
+
+    if (_GxRemoteUrl $Remote) {
+        $remotes = _GxGit @('for-each-ref', '--sort=-committerdate', "--format=$format", "refs/remotes/$Remote")
+        foreach ($line in $remotes.Lines) {
+            if (-not $line.Trim()) { continue }
+            $fields = $line -split '\|', 5
+            if ($fields[0] -match '/HEAD$') { continue }
+            $target = $fields[0] -replace ('^' + [regex]::Escape($Remote) + '/'), ''
+            if ($localNames.Contains($target)) { continue }
+            $choices.Add([pscustomobject]@{
+                Target = $target; Scope = 'remote'; Current = $false
+                Upstream = $fields[0]; When = $fields[3]; Subject = $fields[4]
+            })
+        }
+    }
+
+    return @($choices | Sort-Object @{ Expression = { if ($_.Current) { 0 } elseif ($_.Scope -eq 'local') { 1 } else { 2 } } }, Target)
+}
+
+function _GxReadPickerKey {
+    return [Console]::ReadKey($true)
+}
+
+function _GxRenderBranchPicker {
+    param([object[]]$Choices, [string]$Filter, [int]$Selected, [int]$PreviousRows = 0)
+    $width = _GxTerminalWidth
+    $height = try { [Console]::WindowHeight } catch { 24 }
+    $pageSize = [Math]::Max(3, [Math]::Min(10, $height - 5))
+    $start = if ($Selected -ge $pageSize) { $Selected - $pageSize + 1 } else { 0 }
+    $end = [Math]::Min($Choices.Count, $start + $pageSize)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $filterText = if ($Filter) { $Filter } else { '(type to filter)' }
+    $lines.Add((_GxClipText " gx switch  filter: $filterText" $width))
+    $lines.Add((_GxClipText ' Up/Down select  Enter switch  Esc cancel  Backspace edit' $width))
+    if (-not $Choices.Count) {
+        $lines.Add(' no matching branches')
+    } else {
+        for ($index = $start; $index -lt $end; $index++) {
+            $choice = $Choices[$index]
+            $pointer = if ($index -eq $Selected) { '>' } else { ' ' }
+            $current = if ($choice.Current) { '*' } else { ' ' }
+            $raw = '{0} {1} [{2,-6}] {3}  {4}' -f $pointer, $current, $choice.Scope, $choice.Target, $choice.Subject
+            $raw = _GxClipText $raw $width
+            $line = if ($index -eq $Selected) { _GxC $script:GxConfig.Palette.ok $raw } elseif ($choice.Current) { _GxC $script:GxConfig.Palette.label $raw } else { $raw }
+            $lines.Add($line)
+        }
+    }
+
+    if ($null -eq $script:GxPickerTop) { $script:GxPickerTop = [Console]::CursorTop }
+    [Console]::SetCursorPosition(0, $script:GxPickerTop)
+    $rowsToWrite = [Math]::Max($PreviousRows, $lines.Count)
+    for ($index = 0; $index -lt $rowsToWrite; $index++) {
+        $line = if ($index -lt $lines.Count) { $lines[$index] } else { '' }
+        [Console]::Write("$([char]27)[2K" + $line + [Environment]::NewLine)
+    }
+    return $lines.Count
+}
+
+function _GxClearBranchPicker {
+    param([int]$Rows)
+    if ($null -eq $script:GxPickerTop) { return }
+    [Console]::SetCursorPosition(0, $script:GxPickerTop)
+    for ($index = 0; $index -lt $Rows; $index++) { [Console]::Write("$([char]27)[2K" + [Environment]::NewLine) }
+    [Console]::SetCursorPosition(0, $script:GxPickerTop)
+    $script:GxPickerTop = $null
+}
+
+function _GxSelectBranch {
+    param([object[]]$Choices)
+    $filter = ''
+    $selected = 0
+    $renderedRows = 0
+    $cursorVisible = $true
+    try { $cursorVisible = [Console]::CursorVisible } catch {}
+    $script:GxPickerTop = $null
+    try {
+        try { [Console]::CursorVisible = $false } catch {}
+        while ($true) {
+            $escaped = [System.Management.Automation.WildcardPattern]::Escape($filter)
+            $filtered = if ($filter) { @($Choices | Where-Object { $_.Target -like "*$escaped*" -or $_.Subject -like "*$escaped*" }) } else { @($Choices) }
+            if ($selected -ge $filtered.Count) { $selected = [Math]::Max(0, $filtered.Count - 1) }
+            $renderedRows = _GxRenderBranchPicker -Choices $filtered -Filter $filter -Selected $selected -PreviousRows $renderedRows
+            $key = _GxReadPickerKey
+            switch ([string]$key.Key) {
+                'UpArrow'   { if ($filtered.Count) { $selected = ($selected - 1 + $filtered.Count) % $filtered.Count } }
+                'DownArrow' { if ($filtered.Count) { $selected = ($selected + 1) % $filtered.Count } }
+                'Enter'     { if ($filtered.Count) { return $filtered[$selected].Target } }
+                'Escape'    { return $null }
+                'Backspace' { if ($filter.Length) { $filter = $filter.Substring(0, $filter.Length - 1); $selected = 0 } }
+                default {
+                    if (-not [char]::IsControl($key.KeyChar)) { $filter += $key.KeyChar; $selected = 0 }
+                }
+            }
+        }
+    } finally {
+        _GxClearBranchPicker $renderedRows
+        try { [Console]::CursorVisible = $cursorVisible } catch {}
+    }
+}
+
 function _GxBranch {
     param([hashtable]$o)
     _GxHeader 'branch' (_GxCurrentBranch)
@@ -2856,20 +3124,59 @@ function _GxBranch {
     $refs = @('refs/heads'); if ($o.All) { $refs += 'refs/remotes' }
     $fmt = '%(HEAD)|%(refname:short)|%(upstream:short)|%(upstream:track)|%(committerdate:relative)|%(subject)'
     $r = _GxGit (@('for-each-ref', '--sort=-committerdate', "--format=$fmt") + $refs)
-    $rows = @()
+    $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($l in $r.Lines) {
         if (-not $l.Trim()) { continue }
         $f = $l -split '\|', 6
         if ($f[1] -match '/HEAD$') { continue }
         $isCur = $f[0].Trim() -eq '*'
         $track = $f[3].Trim()
-        $tcol = if ($track -eq '[gone]') { $p.err } elseif ($track) { $p.warn } else { $p.dim }
-        $nm = if ($isCur) { _GxC $p.ok ('* ' + $f[1]) } else { '  ' + $f[1] }
-        $up = if ($f[2]) { _GxC $p.dim ('-> ' + $f[2]) } else { '' }
-        _GxOut ('  ' + $nm + '  ' + $up + ' ' + (_GxC $tcol $track) + '  ' + (_GxC $p.dim $f[4]) + '  ' + $f[5])
-        $rows += @{ Name = $f[1]; Current = $isCur; Upstream = $f[2]; Track = $track; When = $f[4]; Subject = $f[5] }
+        $rows.Add([pscustomobject]@{ Name = $f[1]; Current = $isCur; Upstream = $f[2]; Track = $track; When = $f[4]; Subject = $f[5] })
     }
-    $script:GxData['branches'] = $rows
+
+    $terminalWidth = _GxTerminalWidth
+    $wide = $terminalWidth -ge 96
+    if ($wide) {
+        $maxName = ($rows | ForEach-Object { $_.Name.Length + 2 } | Measure-Object -Maximum).Maximum
+        $maxUpstream = ($rows | ForEach-Object { if ($_.Upstream) { $_.Upstream.Length + 3 } else { 0 } } | Measure-Object -Maximum).Maximum
+        $nameWidth = [Math]::Min(22, [Math]::Max(12, [int]$maxName))
+        $upstreamWidth = [Math]::Min(24, [Math]::Max(10, [int]$maxUpstream))
+        $trackWidth = 12
+        $whenWidth = 12
+        $subjectWidth = [Math]::Max(8, $terminalWidth - 10 - $nameWidth - $upstreamWidth - $trackWidth - $whenWidth)
+    } else {
+        $refWidth = [Math]::Max(18, [Math]::Min(30, [int][Math]::Floor($terminalWidth * 0.38)))
+        $trackWidth = 10
+        $whenWidth = 12
+        $subjectWidth = [Math]::Max(6, $terminalWidth - 8 - $refWidth - $trackWidth - $whenWidth)
+    }
+
+    foreach ($row in $rows) {
+        $trackColor = if ($row.Track -eq '[gone]') { $p.err } elseif ($row.Track) { $p.warn } else { $p.dim }
+        $nameRaw = $(if ($row.Current) { '* ' } else { '  ' }) + $row.Name
+        if ($wide) {
+            $nameText = _GxClipText $nameRaw $nameWidth
+            $upstreamText = _GxClipText $(if ($row.Upstream) { '-> ' + $row.Upstream } else { '' }) $upstreamWidth
+            $line = Clap -Cells @(
+                @{ Text = $(if ($row.Current) { _GxC $p.ok $nameText } else { $nameText }); Width = $nameWidth },
+                @{ Text = (_GxC $p.dim $upstreamText); Width = $upstreamWidth },
+                @{ Text = (_GxC $trackColor (_GxClipText $row.Track $trackWidth)); Width = $trackWidth },
+                @{ Text = (_GxC $p.dim (_GxClipText $row.When $whenWidth)); Width = $whenWidth },
+                @{ Text = (_GxClipText $row.Subject $subjectWidth); Width = $subjectWidth }
+            ) -Separator '  '
+        } else {
+            $refRaw = $nameRaw + $(if ($row.Upstream) { ' -> ' + $row.Upstream } else { '' })
+            $refText = _GxClipText $refRaw $refWidth
+            $line = Clap -Cells @(
+                @{ Text = $(if ($row.Current) { _GxC $p.ok $refText } else { $refText }); Width = $refWidth },
+                @{ Text = (_GxC $trackColor (_GxClipText $row.Track $trackWidth)); Width = $trackWidth },
+                @{ Text = (_GxC $p.dim (_GxClipText $row.When $whenWidth)); Width = $whenWidth },
+                @{ Text = (_GxClipText $row.Subject $subjectWidth); Width = $subjectWidth }
+            ) -Separator '  '
+        }
+        _GxOut ('  ' + $line.TrimEnd())
+    }
+    $script:GxData['branches'] = $rows.ToArray()
 }
 
 function _GxSwitch {
@@ -2877,7 +3184,17 @@ function _GxSwitch {
     _GxHeader 'switch' (_GxCurrentBranch)
     if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
     $t = $o.Name
-    if (-not $t) { _GxRow 'fail' 'branch' 'usage: gx switch <branch>  (-Create to make a new one, -Base <start>)'; return }
+    if (-not $t) {
+        if (-not (_GxCanPrompt)) { _GxRow 'fail' 'branch' 'a branch is required outside an interactive terminal: gx switch <branch>'; return }
+        $choices = @(_GxSwitchChoices (_GxFirst $o.Remote 'origin'))
+        if (-not $choices.Count) { _GxRow 'fail' 'branch' 'no local or remote branches found'; return }
+        $t = _GxSelectBranch $choices
+        if (-not $t) {
+            $script:GxData['switch'] = @{ Cancelled = $true }
+            _GxRow 'info' 'switch' 'cancelled'
+            return
+        }
+    }
     if ($t -notmatch '^[A-Za-z0-9._/@+-]+$') { _GxRow 'fail' 'branch' "invalid name: $t"; return }
     if ((_GxCurrentBranch) -eq $t) { _GxRow 'info' 'switch' "already on $t"; return }
     $remote = _GxFirst $o.Remote 'origin'
@@ -2895,12 +3212,219 @@ function _GxSwitch {
         _GxRow 'fail' 'branch' "'$t' not found locally or on $remote  (-Create to make it; gx sync to refresh remote branches)"
         return
     }
-    if ($r.Ok) { _GxRow 'ok' 'switch' "$t  ($how)" }
+    if ($r.Ok) {
+        $script:GxData['switch'] = @{ Branch = $t; Kind = $how; Cancelled = $false }
+        _GxRow 'ok' 'switch' "$t  ($how)"
+    }
     else {
         if ($r.Text -match '(?i)would be overwritten|commit your changes or stash') {
             _GxRow 'fail' 'switch' 'local changes would be overwritten - commit or stash first'
         } else { _GxRow 'fail' 'switch' ($r.Text.Trim()) }
     }
+}
+
+function _GxRebaseConflicts {
+    $r = _GxGit @('diff', '--name-only', '--diff-filter=U')
+    if (-not $r.Ok) { return @() }
+    return @($r.Lines | Where-Object { $_.Trim() } | Select-Object -Unique)
+}
+
+function _GxRebase {
+    param([hashtable]$o)
+    $branch = _GxCurrentBranch
+    _GxHeader 'rebase' $(if ($branch) { $branch } else { '(detached)' })
+    if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
+
+    $actions = @('Continue', 'Abort', 'Skip' | Where-Object { $o[$_] })
+    if ($actions.Count -gt 1) {
+        _GxRow 'fail' 'rebase' '-Continue, -Abort and -Skip are mutually exclusive'
+        return
+    }
+
+    $state = _GxRepoState
+    $action = if ($actions.Count) { $actions[0].ToLowerInvariant() } else { 'start' }
+    $data = [ordered]@{ Action = $action; Base = $null; Branch = $branch; State = $state; Conflicts = @() }
+    $script:GxData['rebase'] = $data
+
+    if ($action -ne 'start') {
+        if ($state -ne 'rebase in progress') {
+            _GxRow 'fail' 'rebase' "nothing to $action - no rebase is in progress"
+            return
+        }
+        if ($o.Base -or $o.Interactive -or $o.Autostash -or $o.UpdateRefs) {
+            _GxRow 'fail' 'rebase' "-$($actions[0]) cannot be combined with a base, -Interactive, -Autostash or -UpdateRefs"
+            return
+        }
+        if ($action -eq 'continue' -and -not $script:GxDry -and -not (_GxCanPrompt) -and -not $env:GIT_EDITOR) {
+            _GxRow 'fail' 'rebase' '-Continue may open an editor; use an interactive terminal or explicitly set GIT_EDITOR for scripted use'
+            return
+        }
+
+        $args = @('rebase', "--$action")
+        _GxRow 'run' 'rebase' $action
+        if ($action -eq 'continue' -and (_GxCanPrompt) -and -not $script:GxDry) {
+            _GxGitLive $args
+            $result = [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Code = $LASTEXITCODE; Text = '' }
+        } else {
+            $result = _GxGit $args -Mutating
+        }
+    } else {
+        if ($state) {
+            _GxRow 'fail' 'rebase' "$state - finish or abort it before starting another rebase"
+            return
+        }
+        if (-not $branch) { _GxRow 'fail' 'rebase' 'detached HEAD - switch to a branch before rebasing'; return }
+        if ($o.Interactive -and -not $script:GxDry -and -not (_GxCanPrompt)) {
+            _GxRow 'fail' 'rebase' '-Interactive requires a real interactive terminal'
+            return
+        }
+
+        $base = $o.Base
+        if (-not $base) { $base = _GxDefaultBranch }
+        if (-not $base -or -not (_GxRefExists "$base^{commit}")) {
+            _GxRow 'fail' 'base' "unknown commit: $base"
+            return
+        }
+        $data.Base = $base
+
+        $work = _GxWorkStatus
+        if (-not $o.Autostash -and ($work.Staged -or $work.Modified -or $work.Unmerged)) {
+            _GxRow 'fail' 'rebase' 'tracked changes are present - commit/stash them, or use -Autostash'
+            return
+        }
+
+        $args = @('rebase')
+        if ($o.Interactive) { $args += '--interactive' }
+        if ($o.Autostash)   { $args += '--autostash' }
+        if ($o.UpdateRefs)  { $args += '--update-refs' }
+        $args += $base
+        _GxRow 'run' 'rebase' "$branch onto $base"
+        if ($o.Interactive -and -not $script:GxDry) {
+            _GxGitLive $args
+            $result = [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Code = $LASTEXITCODE; Text = '' }
+        } else {
+            $result = _GxGit $args -Mutating
+        }
+    }
+
+    $afterState = _GxRepoState
+    $conflicts = @(_GxRebaseConflicts)
+    $data.State = $afterState
+    $data.Conflicts = $conflicts
+    if (-not $afterState -and $conflicts.Count -and $o.Autostash) {
+        _GxRow 'fail' 'autostash' 'the rebase completed, but restoring local changes caused conflicts'
+        foreach ($file in $conflicts) { _GxLine $file }
+        _GxLine 'resolve the files and git add them; Git keeps the autostash entry when it cannot apply it cleanly'
+        return
+    }
+    if ($result.Ok) {
+        if ($script:GxDry) { _GxRow 'dry' 'rebase' "$action validated; repository unchanged" }
+        elseif ($afterState -eq 'rebase in progress') {
+            _GxRow 'warn' 'rebase' "$action completed, but the rebase is still in progress"
+        } else {
+            $head = (_GxGit @('log', '-1', '--format=%h %s')).Text.Trim()
+            _GxRow 'ok' 'rebase' $(if ($action -eq 'abort') { 'aborted; original branch state restored' } else { "complete$(if ($head) { ": $head" })" })
+        }
+        return
+    }
+
+    if ($afterState -eq 'rebase in progress') {
+        _GxRow 'fail' 'rebase' $(if ($conflicts.Count) { "$($conflicts.Count) conflicted file(s)" } else { "$action stopped; rebase remains in progress" })
+        foreach ($file in $conflicts) { _GxLine $file }
+        _GxLine 'resolve conflicts and git add the files, then: gx rebase -Continue'
+        _GxLine 'or skip this commit: gx rebase -Skip'
+        _GxLine 'or restore the original branch: gx rebase -Abort'
+    } else {
+        $message = if ($result.Text.Trim()) { ($result.Text.Trim() -split "`n" | Select-Object -Last 1) } else { "git rebase exited $($result.Code)" }
+        _GxRow 'fail' 'rebase' $message
+    }
+}
+
+function _GxStagingSummary {
+    param([string]$Action, [string[]]$IntentPaths = @())
+    $index = _GxGit @('diff', '--cached', '--name-status')
+    $staged = @($index.Lines | Where-Object { $_.Trim() })
+    $work = _GxWorkStatus
+    $remaining = $work.Modified + $work.Untracked + $work.Unmerged
+    $script:GxData['staging'] = [ordered]@{
+        Action = $Action; Staged = $staged; StagedCount = $staged.Count
+        RemainingCount = $remaining; IntentPaths = @($IntentPaths)
+    }
+    _GxRow $(if ($staged.Count) { 'ok' } else { 'info' }) 'staged' "$($staged.Count) file(s) in the index"
+    foreach ($line in ($staged | Select-Object -First 12)) { _GxLine $line }
+    if ($staged.Count -gt 12) { _GxLine "... and $($staged.Count - 12) more" }
+    if ($IntentPaths.Count) { _GxRow 'info' 'intent' "$($IntentPaths.Count) path(s) added for diff review; content is not staged" }
+    if ($remaining) { _GxRow 'info' 'remaining' "$remaining worktree file(s) remain; review with gx diff" }
+    elseif ($staged.Count) { _GxRow 'info' 'next' 'review with gx diff -Staged, then gx commit <message>' }
+}
+
+function _GxStage {
+    param([hashtable]$o)
+    _GxHeader 'stage' (_GxCurrentBranch)
+    if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
+    $selectors = @('All', 'Tracked', 'Intent' | Where-Object { $o[$_] })
+    if ($selectors.Count -gt 1) { _GxRow 'fail' 'stage' '-All, -Tracked and -Intent are mutually exclusive'; return }
+    if ($o.Patch -and $selectors.Count) { _GxRow 'fail' 'stage' '-Patch cannot be combined with -All, -Tracked or -Intent'; return }
+    if (-not $o.Paths.Count -and -not $o.All -and -not $o.Tracked -and -not $o.Patch) {
+        _GxRow 'fail' 'stage' 'provide paths, or use -All, -Tracked or -Patch'
+        return
+    }
+    if ($o.Patch -and -not $script:GxDry -and -not (_GxCanPrompt)) {
+        _GxRow 'fail' 'stage' '-Patch requires a real interactive terminal'
+        return
+    }
+
+    $args = @('add')
+    if ($o.Patch)        { $args += '--patch' }
+    elseif ($o.All)      { $args += '--all' }
+    elseif ($o.Tracked)  { $args += '--update' }
+    elseif ($o.Intent)   { $args += '--intent-to-add' }
+    if ($o.Paths.Count) { $args += '--'; $args += $o.Paths }
+
+    if ($o.Patch -and -not $script:GxDry) {
+        _GxGitLive $args
+        if ($LASTEXITCODE -ne 0) { _GxRow 'fail' 'stage' "git add --patch exited $LASTEXITCODE"; return }
+    } else {
+        $result = _GxGit $args -Mutating
+        if (-not $result.Ok) { _GxRow 'fail' 'stage' $result.Text.Trim(); return }
+    }
+    if ($script:GxDry) { _GxRow 'dry' 'stage' 'repository unchanged'; return }
+    _GxStagingSummary 'stage' $(if ($o.Intent) { $o.Paths } else { @() })
+}
+
+function _GxUnstage {
+    param([hashtable]$o)
+    _GxHeader 'unstage' (_GxCurrentBranch)
+    if (-not (_GxInRepo)) { _GxRow 'fail' 'repo' 'not inside a git repository'; return }
+    $hasHead = _GxRefExists 'HEAD'
+    if ($o.Patch -and -not $hasHead) {
+        _GxRow 'fail' 'unstage' '-Patch is unavailable before the first commit; use gx unstage [paths]'
+        return
+    }
+    if ($o.Patch -and -not $script:GxDry -and -not (_GxCanPrompt)) {
+        _GxRow 'fail' 'unstage' '-Patch requires a real interactive terminal'
+        return
+    }
+
+    if ($hasHead) {
+        $args = @('restore', '--staged')
+        if ($o.Patch) { $args += '--patch' }
+        if ($o.Paths.Count) { $args += '--'; $args += $o.Paths }
+        elseif (-not $o.Patch) { $args += @('--', ':/') }
+    } else {
+        $args = @('rm', '--cached', '-r', '--force', '--ignore-unmatch', '--')
+        if ($o.Paths.Count) { $args += $o.Paths } else { $args += ':/' }
+    }
+
+    if ($o.Patch -and -not $script:GxDry) {
+        _GxGitLive $args
+        if ($LASTEXITCODE -ne 0) { _GxRow 'fail' 'unstage' "git restore --patch exited $LASTEXITCODE"; return }
+    } else {
+        $result = _GxGit $args -Mutating
+        if (-not $result.Ok) { _GxRow 'fail' 'unstage' $result.Text.Trim(); return }
+    }
+    if ($script:GxDry) { _GxRow 'dry' 'unstage' 'repository unchanged'; return }
+    _GxStagingSummary 'unstage'
 }
 
 function _GxUndo {
@@ -3165,30 +3689,31 @@ function _GxCompleteDate {
         Where-Object { $_ -like "$Word*" } | ForEach-Object { _GxCR $_ 'git date: relative (2.weeks) or absolute (2026-01-31)' }
 }
 
-Register-ArgumentCompleter -CommandName gx -ParameterName To        -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Branch    -ScriptBlock { param($c, $p, $w) _GxCompleteBranches $w -IncludeRemote }
-Register-ArgumentCompleter -CommandName gx -ParameterName Namespace -ScriptBlock { param($c, $p, $w) _GxCompleteNamespace $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Server    -ScriptBlock { param($c, $p, $w) _GxCompleteServer $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName User      -ScriptBlock { param($c, $p, $w) _GxCompleteUser $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName TokenVar  -ScriptBlock { param($c, $p, $w) _GxCompleteTokenVar $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Scope     -ScriptBlock { param($c, $p, $w) _GxCompleteScope $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Author    -ScriptBlock { param($c, $p, $w) _GxCompleteAuthor $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Since     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Until     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName License   -ScriptBlock { param($c, $p, $w) 'MIT' | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ 'the only built-in license' } }
-Register-ArgumentCompleter -CommandName gx -ParameterName Type   -ScriptBlock { param($c, $p, $w) _GxCompleteType $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Base   -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Delete -ScriptBlock {
+$script:GxCompletionCommands = @('gx', 'gx.ps1')
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName To        -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Branch    -ScriptBlock { param($c, $p, $w) _GxCompleteBranches $w -IncludeRemote }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Namespace -ScriptBlock { param($c, $p, $w) _GxCompleteNamespace $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Server    -ScriptBlock { param($c, $p, $w) _GxCompleteServer $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName User      -ScriptBlock { param($c, $p, $w) _GxCompleteUser $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName TokenVar  -ScriptBlock { param($c, $p, $w) _GxCompleteTokenVar $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Scope     -ScriptBlock { param($c, $p, $w) _GxCompleteScope $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Author    -ScriptBlock { param($c, $p, $w) _GxCompleteAuthor $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Since     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Until     -ScriptBlock { param($c, $p, $w) _GxCompleteDate $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName License   -ScriptBlock { param($c, $p, $w) 'MIT' | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ 'the only built-in license' } }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Type   -ScriptBlock { param($c, $p, $w) _GxCompleteType $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Base   -ScriptBlock { param($c, $p, $w) _GxCompleteRefs $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Delete -ScriptBlock {
     param($c, $p, $w, $ast, $fake)
     $mode = $fake['Mode']
     if (-not $mode) { $els = $ast.CommandElements; if ($els.Count -gt 1 -and $els[1] -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $mode = $els[1].Value } }
     if ("$mode" -ieq 'tag') { _GxCompleteTags $w } else { _GxCompleteBranches $w }
 }
-Register-ArgumentCompleter -CommandName gx -ParameterName Gitignore -ScriptBlock { param($c, $p, $w) _GxCompleteTemplates $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName Remote -ScriptBlock { param($c, $p, $w) _GxCompleteRemotes $w }
-Register-ArgumentCompleter -CommandName gx -ParameterName File   -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
-Register-ArgumentCompleter -CommandName gx -ParameterName Add    -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
-Register-ArgumentCompleter -CommandName gx -ParameterName Target -ScriptBlock {
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Gitignore -ScriptBlock { param($c, $p, $w) _GxCompleteTemplates $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Remote -ScriptBlock { param($c, $p, $w) _GxCompleteRemotes $w }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName File   -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Add    -ScriptBlock { param($c, $p, $w) _GxCompleteFiles $w 'Diff' }
+Register-ArgumentCompleter -CommandName $script:GxCompletionCommands -ParameterName Target -ScriptBlock {
     param($c, $p, $w, $ast, $fake)
     $mode = $fake['Mode']
     if (-not $mode) {
@@ -3199,11 +3724,33 @@ Register-ArgumentCompleter -CommandName gx -ParameterName Target -ScriptBlock {
         '^(?i:diff|add)$' { _GxCompleteFiles $w 'Diff' }
         '^(?i:log)$'    { _GxCompleteFiles $w 'Log' }
         '^(?i:switch)$' { _GxCompleteBranches $w -IncludeRemote }
+        '^(?i:rebase)$' { _GxCompleteRefs $w }
+        '^(?i:stage)$'  { _GxCompleteFiles $w 'Diff' }
+        '^(?i:unstage)$' { _GxGitLines @('diff', '--cached', '--name-only', '--relative') | Where-Object { $_ -like "$w*" } | Select-Object -Unique -First 50 | ForEach-Object { _GxCR $_ } }
         '^(?i:ignore)$' { _GxCompleteTemplates $w }
         '^(?i:tag)$'    { _GxCompleteTags $w }
         '^(?i:help)$'   { $script:GxDocs.Keys | Sort-Object | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ } }
         '^(?i:open)$'   { 'repo', 'mr', 'new', 'issues', 'ci', 'branch', 'commit', 'tags', 'releases' | Where-Object { $_ -like "$w*" } | ForEach-Object { _GxCR $_ } }
     }
+}
+
+# An extensionless ./gx launcher is a native command to PowerShell, so it cannot
+# expose a param block. Re-run completion against the loaded gx function and
+# return the same results used by the module and gx.ps1 paths.
+Register-ArgumentCompleter -Native -CommandName gx -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commandText = $commandAst.Extent.Text
+    $commandElement = $commandAst.CommandElements[0].Extent
+    $commandLength = $commandElement.EndOffset - $commandElement.StartOffset
+    $relativeStart = $commandElement.StartOffset - $commandAst.Extent.StartOffset
+    $relativeCursor = $cursorPosition - $commandAst.Extent.StartOffset
+    $trailingSpaceCount = [Math]::Max(0, $relativeCursor - $commandText.Length)
+    if ($trailingSpaceCount) { $commandText += ' ' * $trailingSpaceCount }
+
+    $functionText = $commandText.Remove($relativeStart, $commandLength).Insert($relativeStart, 'gx')
+    $functionCursor = $relativeCursor + 2 - $commandLength
+    [System.Management.Automation.CommandCompletion]::CompleteInput($functionText, $functionCursor, $null).CompletionMatches
 }
 
 # =====================================================================
@@ -3317,6 +3864,8 @@ function _GxDiff {
     }
 }
 
+$script:GxDisplayName = 'Git Executor (GX)'
+$script:GxDisplayVersion = 'v0.0.0 prerelease'
 $script:GxVersion = try {
     $manifestPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'gx.psd1' } else {
         $dir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
@@ -4069,7 +4618,7 @@ $script:GxCommon = @(
     @('-Quiet', 'no output (the exit code and -PassThru still work)'),
     @('-CommandTrace', 'show every git command the action runs, with exit code and timing (also in -PassThru Data.trace)'),
     @('-PassThru', 'also return a result object: Mode, Ok, ExitCode, Rows, Data'),
-    @('-Json', 'print that result as JSON (implies -Quiet; not for log/diff)'),
+    @('-Json', 'print JSON, formatted through jq when available (implies -Quiet; not for log/diff)'),
     @('-Help', 'this screen, or gx <mode> -Help for one mode')
 )
 
@@ -4134,12 +4683,31 @@ $script:GxDocs = @{
         Options  = @(@('-All', 'include remote branches'), @('-Clean', 'delete local branches merged into the default branch, or whose upstream is gone'), @('-Delete name', 'git branch -d (safe); -Force = -D'), @('-Force', 'with -Clean: also delete gone-but-unmerged branches'))
         Examples = @('gx branch', 'gx branch -Clean -DryRun', 'gx branch -Delete wip/x -Force')
         Notes    = @('Never deletes the current or default branch.') }
-    switch = @{ Group = 'everyday'; Order = 8
-        Summary  = 'switch branches, tracking a remote branch or creating a new one'
-        Usage    = @('gx switch <branch> [-Create [-Base <ref>]]')
+    switch = @{ Group = 'everyday'; Order = 7
+        Summary  = 'pick or switch branches, tracking a remote branch or creating a new one'
+        Usage    = @('gx switch', 'gx switch <branch> [-Create [-Base <ref>]]')
         Options  = @(@('-Create', 'make the branch if it does not exist'), @('-Base ref', 'start point for -Create'))
-        Examples = @('gx switch main', 'gx switch feat/cache -Create', 'gx switch hotfix -Create -Base v1.2.0') ; Notes = @() }
-    undo = @{ Group = 'everyday'; Order = 9
+        Examples = @('gx switch', 'gx switch main', 'gx switch feat/cache -Create', 'gx switch hotfix -Create -Base v1.2.0')
+        Notes    = @('With no branch, an interactive terminal opens the built-in selector. Scripts, CI, redirected output, -Quiet, -PassThru and -Json must provide a branch.') }
+    rebase = @{ Group = 'everyday'; Order = 8
+        Summary  = 'replay the current branch safely onto a base, with guided conflict recovery'
+        Usage    = @('gx rebase [base] [-Autostash] [-Interactive] [-UpdateRefs]', 'gx rebase -Continue | -Abort | -Skip')
+        Options  = @(@('-Autostash', 'stash tracked changes around the rebase and restore them afterwards'), @('-Interactive', 'open Git''s native interactive rebase todo editor (terminal only)'), @('-UpdateRefs', 'move other local refs that point into the rewritten commits'), @('-Continue / -Skip / -Abort', 'continue after resolving, omit the current commit, or restore the original branch'))
+        Examples = @('gx rebase', 'gx rebase origin/main -Autostash', 'gx rebase -Interactive main', 'gx rebase -Continue')
+        Notes    = @('Without a base, gx uses the repository default branch. Conflicts list their files and the exact recovery commands.', 'For scripted -Continue, explicitly set GIT_EDITOR to a non-interactive editor command.') }
+    stage = @{ Group = 'everyday'; Order = 9
+        Summary  = 'stage selected changes, tracked changes, everything, or intent-to-add paths'
+        Usage    = @('gx stage <paths...>', 'gx stage -All | -Tracked | -Patch', 'gx stage <paths...> -Intent')
+        Options  = @(@('-All', 'stage all tracked and untracked changes'), @('-Tracked', 'stage modifications and deletions of tracked files'), @('-Patch', 'interactively select hunks in Git''s native terminal UI'), @('-Intent', 'mark untracked paths for review without staging their content'))
+        Examples = @('gx stage src/app.ps1', 'gx stage -All', 'gx stage new-file.ps1 -Intent', 'gx stage src/app.ps1 -Patch')
+        Notes    = @('Paths are passed after --, so names beginning with a dash are treated literally.') }
+    unstage = @{ Group = 'everyday'; Order = 10
+        Summary  = 'remove paths or selected hunks from the index while preserving worktree content'
+        Usage    = @('gx unstage [paths...] [-Patch]')
+        Options  = @(@('-Patch', 'interactively select staged hunks to remove from the index'))
+        Examples = @('gx unstage', 'gx unstage src/app.ps1', 'gx unstage src/app.ps1 -Patch')
+        Notes    = @('With no paths, unstages the entire index. Before the first commit, gx uses an index-only removal that keeps every worktree file.') }
+    undo = @{ Group = 'everyday'; Order = 11
         Summary  = 'soft-undo the last commit(s): changes stay staged'
         Usage    = @('gx undo [-Count n] [-Force]')
         Options  = @(@('-Count n', 'how many commits'), @('-Force', 'allow it when the commit is already on the upstream (you will need a force push later)'))
@@ -4295,6 +4863,24 @@ function _GxSemver {
     }
 }
 
+function _GxHelpGroupHeader {
+    param([string]$Text)
+    $title = (Get-Culture).TextInfo.ToTitleCase($Text)
+    return (_GxC $script:GxConfig.Palette.dim '░░░▌ ') + (_GxC $script:GxConfig.Palette.label $title) + (_GxC $script:GxConfig.Palette.dim ' ░')
+}
+
+function _GxModeOptionHint {
+    param($Document, [int]$Width)
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($option in @($Document.Options)) {
+        foreach ($match in [regex]::Matches([string]$option[0], '-[A-Za-z][A-Za-z0-9]*')) {
+            if (-not $names.Contains($match.Value)) { $names.Add($match.Value) }
+        }
+    }
+    if (-not $names.Count) { return '' }
+    return (_GxClipText ('params  ' + ($names -join ' ')) $Width)
+}
+
 function _GxHelp {
     $p = $script:GxConfig.Palette
     $lab = { param($t) _GxC $p.label $t }
@@ -4302,7 +4888,7 @@ function _GxHelp {
     Write-Host ''
     $b = @(_GxBanner)
     $side = @(
-        ('  ' + (& $lab 'gx') + ' ' + (& $dim ('v' + $script:GxVersion))),
+        ('  ' + (& $lab $script:GxDisplayName) + ' ' + (& $dim $script:GxDisplayVersion)),
         ('  ' + 'personal git QOL'),
         ('  ' + (& $dim 'git-only | no API calls | PowerShell 7.3+')),
         ('  ' + (& $dim ('config: ' + $script:GxConfigPath + $(if ($script:GxConfigState.Loaded) { '' } else { '  (none)' }))))
@@ -4311,14 +4897,20 @@ function _GxHelp {
     Write-Host ''
     Write-Host (' ' + (& $lab 'usage') + '   gx [mode] [words...] [options]     ' + (& $dim 'gx <mode> -Help  |  gx help <mode>'))
     Write-Host ('         ' + (& $dim 'quote a message that contains  # ; | & > < $  or a word starting with -   (PowerShell would eat it)'))
+    $terminalWidth = _GxTerminalWidth
     foreach ($g in $script:GxGroups) {
         Write-Host ''
-        Write-Host (' ' + (& $lab $g[1]))
+        Write-Host (' ' + (_GxHelpGroupHeader $g[1]))
         $modes = @($script:GxDocs.Keys | Where-Object { $script:GxDocs[$_].Group -eq $g[0] } | Sort-Object { $script:GxDocs[$_].Order })
-        foreach ($m in $modes) { Write-Host (Clap -Strings '  ', (_GxC $p.mode $m), $script:GxDocs[$m].Summary -Width 0, 8, 0 -Separator ' ') }
+        foreach ($m in $modes) {
+            $summary = _GxClipText $script:GxDocs[$m].Summary ([Math]::Max(12, $terminalWidth - 13))
+            Write-Host (Clap -Strings '  ', (_GxC $p.mode $m), $summary -Width 0, 8, 0 -Separator ' ')
+            $hint = _GxModeOptionHint $script:GxDocs[$m] ([Math]::Max(12, $terminalWidth - 13))
+            if ($hint) { Write-Host ('             ' + (& $dim $hint)) }
+        }
     }
     Write-Host ''
-    Write-Host (' ' + (& $lab 'everywhere'))
+    Write-Host (' ' + (_GxHelpGroupHeader 'everywhere'))
     foreach ($o in $script:GxCommon) { Write-Host (Clap -Strings '  ', (_GxC $p.mode $o[0]), $o[1] -Width 0, 10, 0 -Separator ' ') }
     Write-Host ''
     Write-Host (' ' + (& $lab 'env') + '   GITLAB_API_KEY  GITHUB_API_KEY  GITEA_API_KEY  GX_USER  GX_NAMESPACE  GX_CONFIG  GX_TRACE_LOG  NO_COLOR')
@@ -4359,6 +4951,58 @@ function _GxModeHelp {
     Write-Host ''
 }
 
+function _GxFindJq {
+    $command = Get-Command jq -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function _GxInvokeJq {
+    param([string]$Path, [string]$Json)
+    $process = $null
+    try {
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $Path
+        [void]$startInfo.ArgumentList.Add('--monochrome-output')
+        [void]$startInfo.ArgumentList.Add('.')
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { return [pscustomobject]@{ Ok = $false; Text = $null } }
+
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Write($Json)
+        $process.StandardInput.Close()
+        $process.WaitForExit()
+        $output = $outputTask.GetAwaiter().GetResult()
+        [void]$errorTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($output)) {
+            return [pscustomobject]@{ Ok = $true; Text = $output.TrimEnd("`r", "`n") }
+        }
+    } catch {
+        # jq is optional. Launch and parse failures fall back to PowerShell JSON.
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+    return [pscustomobject]@{ Ok = $false; Text = $null }
+}
+
+function _GxFormatJson {
+    param([string]$Json, [string]$JqPath)
+    if ([string]::IsNullOrWhiteSpace($JqPath)) { return $Json }
+    $formatted = _GxInvokeJq -Path $JqPath -Json $Json
+    if ($formatted.Ok) { return $formatted.Text }
+    return $Json
+}
+
 # =====================================================================
 #  ENTRY POINT
 # =====================================================================
@@ -4377,12 +5021,12 @@ function gx {
         gx help <mode>     same
 
     .PARAMETER Mode
-        status add setup init clone mirror commit push pull sync branch switch undo tag log diff open
+        status setup init clone mirror commit push pull sync branch switch rebase stage unstage undo tag log diff open
         ignore config check doctor sweep semver help. Defaults to status. Case-insensitive; tab-completes.
 
     .PARAMETER Target
-        The words after the mode: the commit message, paths for log/diff, a repo for clone, a branch for switch,
-        a tag name, folders for sweep, template names for ignore.
+        The words after the mode: the commit message, paths for log/diff/stage/unstage, a repo for clone, a branch for switch,
+        a rebase base, a tag name, folders for sweep, template names for ignore.
 
     .EXAMPLE
         gx
@@ -4411,8 +5055,8 @@ function gx {
     [CmdletBinding()]
     param(
         [Parameter(Position = 0)]
-        [ValidateSet('Status', 'Add', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
-                     'Branch', 'Switch', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
+        [ValidateSet('Status', 'Setup', 'Init', 'Clone', 'Mirror', 'Commit', 'Push', 'Pull', 'Sync',
+                     'Branch', 'Switch', 'Rebase', 'Stage', 'Unstage', 'Undo', 'Tag', 'Log', 'Diff', 'Open', 'Ignore', 'Config',
                      'Check', 'Doctor', 'Sweep', 'Semver', 'Help')]
         [string]$Mode,
 
@@ -4491,6 +5135,13 @@ function gx {
         [switch]$Rebase,
         [switch]$Merge,
         [switch]$Autostash,
+        [switch]$Continue,
+        [switch]$Abort,
+        [switch]$Skip,
+        [switch]$Interactive,
+        [switch]$UpdateRefs,
+        [switch]$Patch,
+        [switch]$Intent,
         [ValidateSet('major', 'minor', 'patch')]
         [string]$Bump,
         [switch]$Lightweight,
@@ -4528,6 +5179,7 @@ function gx {
 
     $script:GxDry      = [bool]$DryRun
     $script:GxQuiet    = [bool]($Quiet -or $Json)
+    $script:GxNonInteractive = [bool]($Quiet -or $Json -or $PassThru)
     $script:GxColorOn  = _GxUseColor
     $script:GxOk       = $true
     $script:GxRows     = [System.Collections.Generic.List[object]]::new()
@@ -4540,6 +5192,7 @@ function gx {
     $script:GxTraceLogWarned = $false
     if ($CommandTrace) { $script:GxTraceLog = [System.Collections.Generic.List[object]]::new() }   # not `= if (...) { List }`: the pipeline would unroll an empty list to $null
     $script:GxTraceMode = $(if ($Mode) { $Mode } else { 'Status' })
+    $script:GxJqPath = $(if ($Json) { _GxFindJq } else { $null })
     $names = @($script:GxConfig.Providers.Values | ForEach-Object { $_.TokenVar }) + @($TokenVar)
     foreach ($n in $names) {
         if ($n) { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { $script:GxSecrets += $v } }
@@ -4602,6 +5255,10 @@ function gx {
                 'Sync'   { _GxSync $syncOpts }
                 'Branch' { _GxBranch @{ Delete = $Delete; Clean = [bool]$Clean; Force = [bool]$Force; All = [bool]$All } }
                 'Switch' { _GxSwitch @{ Name = $first; Create = [bool]$Create; Base = $Base; Remote = $Remote } }
+                'Rebase' { _GxRebase @{ Base = (_GxFirst $Base $first); Continue = [bool]$Continue; Abort = [bool]$Abort; Skip = [bool]$Skip
+                                         Autostash = [bool]$Autostash; Interactive = [bool]$Interactive; UpdateRefs = [bool]$UpdateRefs } }
+                'Stage'  { _GxStage @{ Paths = @($words); All = [bool]$All; Tracked = [bool]$Tracked; Patch = [bool]$Patch; Intent = [bool]$Intent } }
+                'Unstage' { _GxUnstage @{ Paths = @($words); Patch = [bool]$Patch } }
                 'Undo'   { _GxUndo @{ Count = $Count; Force = [bool]$Force } }
                 'Tag' {
                     _GxTag @{ Name = $first; Bump = $Bump; Message = $Message; Lightweight = [bool]$Lightweight; Base = $Base; Push = [bool]$Push
@@ -4640,7 +5297,10 @@ function gx {
             Mode = (Get-Culture).TextInfo.ToTitleCase("$Mode".ToLower()); Ok = $script:GxOk; ExitCode = $global:LASTEXITCODE
             Rows = $script:GxRows.ToArray(); Data = $script:GxData
         }
-        if ($Json) { $result | ConvertTo-Json -Depth 6 } else { $result }
+        if ($Json) {
+            $jsonText = $result | ConvertTo-Json -Depth 6
+            _GxFormatJson -Json $jsonText -JqPath $script:GxJqPath
+        } else { $result }
     }
 }
 
@@ -4654,12 +5314,12 @@ _GxLoadConfig
 #  InvocationName is '.' only when dot-sourced.
 # ---------------------------------------------------------------------
 if ($MyInvocation.InvocationName -ne '.') {
-    if ($args.Count -eq 0) {
+    if ($PSBoundParameters.Count -eq 0) {
         gx help
         Write-Host ('  ' + (_GxC $script:GxConfig.Palette.dim ('tip: `. ' + $MyInvocation.MyCommand.Path + '` defines the gx command for this session; add that line to $PROFILE to keep it.')))
         Write-Host ''
         exit 0
     }
-    gx @args
+    gx @PSBoundParameters
     exit $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 })
 }

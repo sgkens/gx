@@ -11,17 +11,12 @@ All notable changes to `gx` are recorded in this file.
 
 ### Added
 
-- Standalone `gx add` for positional paths, `-Add` arrays, `-All`/`-AddAll`, or tracked changes; shares staging with commit shortcuts and supports dry runs, tracing and JSON.
+- Safe standalone `gx rebase [base]` workflows with default-branch resolution, autostash, interactive todo editing, ref updates, dry-run previews, structured output, and guided continue/skip/abort conflict recovery.
+- First-class `gx stage` and `gx unstage` workflows with literal path handling, tracked/all/intent-to-add modes, interactive patch selection, unborn-branch safety, dry-run previews, and structured index summaries.
 
-- Configurable `originType` default, `gx config -Reload`, and coloured log subjects, commit previews and indented full-detail message bodies.
+## 0.1.0
 
-- Optional live ShellDock output and diagnostic streams, configurable ASCII frames, refresh interval and gradient palette respecting `NO_COLOR`.
-- Stream native Git output through masking and result collection while it executes, preserving exit codes without repeating lines.
-
-- Embed ShellDock for commit, clone, fetch, pull and push, with delayed terminal progress and no animation in scripting output.
-- Standalone ShellDock module with explicit arguments, stream forwarding, timeouts, cleanup and a tool to synchronise its embedded copy.
-
-- PowerShell credential reader by default, with `tokenHelperShell: "Sh"` available in config. Re-run `gx setup` to refresh existing helpers.
+### Added
 
 - Individual path staging through `gx commit -Add`.
 - Optional module packaging that exports only `gx`.
