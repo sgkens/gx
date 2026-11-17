@@ -4,6 +4,11 @@ All notable changes to `gx` are recorded in this file.
 
 ## Unreleased
 
+### Changed
+
+- Use pastel orange for tracked status paths and soft green for untracked paths, with matching commit summaries and separate status branch/commit accents.
+- Use soft cyan for log authors and muted teal for dates; expose the new accents through the shared palette.
+
 ### Added
 
 - Safe standalone `gx rebase [base]` workflows with default-branch resolution, autostash, interactive todo editing, ref updates, dry-run previews, structured output, and guided continue/skip/abort conflict recovery.
@@ -18,6 +23,10 @@ All notable changes to `gx` are recorded in this file.
 - GitLab CI checks for Pester coverage and PSScriptAnalyzer findings.
 
 ### Fixed
+
+- Explicit setup provider changes select that provider's server, with `-Force` required to repoint an existing remote; explicit servers take precedence during provider inference.
+
+- Display token variables using PowerShell `$env:` syntax and preserve whitespace and shell metacharacters in helper credentials.
 
 - Reject credential-bearing HTTP push URLs before changing repository configuration unless URL token storage is explicitly selected.
 - Preserve a local tag when remote deletion is refused for missing `-Force`.

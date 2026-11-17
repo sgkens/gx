@@ -1,4 +1,4 @@
-![gx Banner](https://r2os.staticcanvas.me/logos/gx/dist/webp/gx-logo-64x64.webp)
+![gx Banner](https://bucket.s3.silvercottage.dev/logos/gx/gx-banner.png)
 
 [![gitlab-license](https://img.shields.io/gitlab/license/sgkens/gx?style=flat-square&logo=gitlab&labelColor=%23000080&color=%230087ff&logoColor=%23ffffff)](https://gitlab.com/sgkens/gx)
 
@@ -182,7 +182,7 @@ $env:GITHUB_API_KEY = '<personal access token>'      # github.com
 $env:GITEA_API_KEY  = '<personal access token>'      # Gitea / Forgejo / Codeberg (needs -Server or a config "hosts" entry)
 
 # 3. optional: your defaults (user, namespace, identity...)
-gx config -Create        # writes ~/.gx.json with an example; edit it, then `gx config` to verify
+gx config -Create        # writes ~/.gx.json with an example; edit it, then `gx config -Reload` to apply and verify
 
 # 4. check the environment
 gx doctor
@@ -269,9 +269,40 @@ gx status -Json | ConvertFrom-Json
 
 > Flags a remote that still carries a plaintext token, and an env var that is not set in this shell.
 
+Status colours apply to both the status code and filename: tracked changes use pastel orange, new `??` files
+use soft green, and conflicts stay red. Counts use the same colours. The branch/upstream and last-commit hash,
+subject and date have separate accents. Git's two status columns still distinguish staged and working-tree changes.
+
+#### `gx add`
+
+Stage changes without creating a commit or supplying a message or type.
+
+```powershell
+gx add src/parser.ps1 tests/parser.Tests.ps1
+gx add -Add @('one.txt', 'two words.txt')
+gx add -All                       # also: gx add -AddAll
+gx add -Tracked                   # tracked modifications and deletions only
+gx diff -Staged                   # inspect the index
+gx commit "feat: update parser"   # commit what was staged earlier
+```
+
+| Selection                  | Behaviour                                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Positional paths or `-Add` | Files, directories or Git pathspecs; `-Add` accepts a string array.                                    |
+| `-All` / `-AddAll`         | Stage additions, modifications and deletions throughout the repository, including from a subdirectory. |
+| `-Tracked`                 | Stage tracked modifications and deletions, leaving new files alone.                                    |
+| `-DryRun`                  | Show the command without changing the index.                                                           |
+
+Choose paths, all changes, or tracked changes; those selections cannot be combined. Existing staged changes are
+preserved. Ignored files follow Git's normal rules. The secrets guard runs when committing, including after a
+separate `gx add`. `-PassThru`, `-Quiet`, `-Json` and `-CommandTrace` work as for other actions.
+
 #### `gx commit`
 
-Git commit -m with a conventional prefix, a staged summary and a secrets guard.
+Git commit -m with an optional conventional prefix, a staged summary and a secrets guard.
+`-Add` and `-AddAll` stage before committing; omit them to commit changes already staged with `gx add` or Git.
+All staged changes are committed, including files staged earlier; `-Add` selects what to stage first.
+A message is required except for an amend, while `-Type` is optional.
 
 ```powershell
 gx commit <message words> [options]
@@ -532,24 +563,24 @@ gx tag v2.0.0 -Message "The big one" -Push
 
 #### `gx log`
 
-Graph log in the same palette; Compact or Full metadata.
+Graph log with coloured hashes, refs and subjects, soft cyan authors and muted teal dates. Full detail adds indented message bodies with a separate colour.
 
 ```powershell
 gx log [paths] [options]
 ```
 
-| Option                |                                                          |
-| --------------------- | -------------------------------------------------------- |
-| `-Detail Full`        | adds author + email + dates, committer, signature status |
-| `-All`                | every branch and tag                                     |
-| `-Branch ref`         | log another ref                                          |
-| `-Count n`            | default 25; 0 = unlimited                                |
-| `-Author x / -Me`     | filter by author / by your git email                     |
-| `-Grep text`          | message contains text (case-insensitive)                 |
-| `-Since / -Until`     | date filters (2.weeks, 2026-01-01)                       |
-| `-Merges / -NoMerges` | only / without merge commits                             |
-| `-Stat`               | per-commit file stats                                    |
-| `-NoPager`            | print straight to the terminal                           |
+| Option                |                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `-Detail Full`        | adds author + email + dates, committer, signature status and indented message body |
+| `-All`                | every branch and tag                                                               |
+| `-Branch ref`         | log another ref                                                                    |
+| `-Count n`            | default 25; 0 = unlimited                                                          |
+| `-Author x / -Me`     | filter by author / by your git email                                               |
+| `-Grep text`          | message contains text (case-insensitive)                                           |
+| `-Since / -Until`     | date filters (2.weeks, 2026-01-01)                                                 |
+| `-Merges / -NoMerges` | only / without merge commits                                                       |
+| `-Stat`               | per-commit file stats                                                              |
+| `-NoPager`            | print straight to the terminal                                                     |
 
 ```powershell
 gx log
@@ -622,7 +653,7 @@ gx setup [-Name repo] [-Namespace ns] [-Push] [options]
 
 | Option                       |                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------- |
-| `-OriginType t`              | gitlab \| github \| gitea \| custom (default gitlab; inferred from an existing remote)            |
+| `-OriginType t`              | gitlab \| github \| gitea \| custom (default from `originType`; inferred from an existing remote) |
 | `-Server host[:port]`        | self-hosted server                                                                                |
 | `-Name / -Namespace / -User` | override what is resolved from the remote or folder                                               |
 | `-Remote name`               | configure a remote other than origin (e.g. upstream)                                              |
@@ -733,13 +764,14 @@ gx ignore -List
 Show the effective configuration, or write an example config file.
 
 ```powershell
-gx config
+gx config [-Reload]
 gx config -Create [-Force]
 ```
 
 | Option    |                                                      |
 | --------- | ---------------------------------------------------- |
 | `-Create` | write ~/.gx.json (or $env:GX_CONFIG) with an example |
+| `-Reload` | reload the file and show the effective settings      |
 
 ```powershell
 gx config
@@ -867,15 +899,15 @@ $ gx setup -Push -CommandTrace
 - **Structured:** `-PassThru`/`-Json` add `Data.trace`, an array of `{ Seq, Time, Action, Kind, Dir, Command, ExitCode, Ms, Executed, OutputLines, Error }`.
   With `-Quiet` nothing is printed but the data is still there:
 
-    ```powershell
-    (gx sync -CommandTrace -Quiet -PassThru).Data.trace | Where-Object Kind -eq write | Select-Object Ms, Command
-    ```
+  ```powershell
+  (gx sync -CommandTrace -Quiet -PassThru).Data.trace | Where-Object Kind -eq write | Select-Object Ms, Command
+  ```
 
 - **Log file:** set `GX_TRACE_LOG` (or `"traceLog"` in the config) and each traced run is _appended_ to that file, one line per command with a
   timestamp and the action. Without the flag nothing is written.
-    ```text
-    2026-09-21T15:49:21+00:00  gx setup  [write] exit=0 15ms  git push -u origin main   (/home/me/src/helm-core)
-    ```
+  ```text
+  2026-09-21T15:49:21+00:00  gx setup  [write] exit=0 15ms  git push -u origin main   (/home/me/src/helm-core)
+  ```
 - In `gx sweep`, each line also shows which repository the command ran in.
 - Tracing is switched off again when the action ends (even if it throws), so it can never leak into tab completion.
 
@@ -890,17 +922,36 @@ What `gx setup` does instead (`-TokenStorage Env`, the default):
 $ git config --local --get-regexp 'credential|remote.origin.url'
 remote.origin.url https://gitlab.com/sgkens/demo.git
 credential.https://gitlab.com.helper                                   <- empty entry: reset the helper chain for this host
-credential.https://gitlab.com.helper !f() { test $1 = get || exit 0; test ${GITLAB_API_KEY:+x} || { echo gx: GITLAB_API_KEY is not set >&2; exit 0; }; echo username=sgkens; echo password=$GITLAB_API_KEY; }; f
+credential.https://gitlab.com.helper !f() { test "$1" = get || return 0; pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand <encoded-reader>; : gx-token-var=GITLAB_API_KEY; }; f
 ```
 
 - The remote URL is clean.
 - The helper is **scoped to the host** and lives in the repo's local config, so it never overrides your global
   credential manager for other hosts.
-- The token is read from `$GITLAB_API_KEY` **when git asks for it**. The value is not stored anywhere. Rotate the
+- The token is read from `$env:GITLAB_API_KEY` **when git asks for it**. The value is not stored anywhere. Rotate the
   variable and every repo follows.
 - If the variable is unset the helper prints a one-line reason and returns _nothing_ (instead of sending an empty
   password), so git fails with a clear message rather than a confusing 401.
 - Values that end up inside the shell helper (host, user, variable name) are validated against injection.
+
+The default `tokenHelperShell` is `PowerShell`: Git launches `pwsh` without profiles to read the inherited process
+environment. The encoded command contains reader code and variable names only. It contains no token.
+Set `"tokenHelperShell": "Sh"` in `~/.gx.json` to use a POSIX shell reader instead. Both readers use the same environment
+on Windows and Linux; neither reads ordinary PowerShell variables such as `$GITHUB_API_KEY` or unexported Bash variables.
+Re-run `gx setup` in each existing repo after changing the setting to replace its installed helper.
+
+In the PowerShell session that runs `gx`, set the token before setup or push:
+
+```powershell
+# PowerShell on Windows or Linux; substitute your token locally.
+$env:GITHUB_API_KEY = '<your-token>'
+gx setup
+gx push
+```
+
+When launching PowerShell from Bash, use `export GITHUB_API_KEY=...` before starting `pwsh`. An existing PowerShell
+process does not pick up environment changes made later in another terminal. Use `gx doctor` to check presence and
+credential resolution without printing the token. Normal `$GITHUB_API_KEY = ...` assignments do not set the environment.
 
 | `-TokenStorage` | URL in `.git/config`              | Use when                                                    |
 | --------------- | --------------------------------- | ----------------------------------------------------------- |
@@ -965,15 +1016,48 @@ if ((gx commit "wip" -AddAll -PassThru -Quiet).Ok) { gx push -Quiet }
 - Tokens are masked in `Rows` and `Data` exactly as on screen.
 - Colour: `NO_COLOR` is honoured and output that is redirected to a file/pipe is plain.
 
+## ShellDock execution
+
+Add, commit, clone, fetch, pull and push run through the embedded ShellDock worker, with a delayed ASCII spinner on
+interactive terminals. `-Quiet`, `-Json`, redirected output and dry runs remain free of progress animation.
+Git output streams as it arrives, with secret masking applied before display and each line recorded once.
+Failures and command traces retain their existing result format.
+
+[`New-ShellDock.psm1`](New-ShellDock.psm1) is the standalone source you can copy back to another module folder.
+It requires no external UI helpers. After editing it, run `./tools/Sync-ShellDock.ps1` to update the embedded function.
+See [ShellDock usage and parameters](ShellDock.md) for `-Stream`, spinner frames, gradient colours, arguments, timeouts and isolation behaviour.
+
 ## Config file
 
 `~/.gx.json` (or the path in `$env:GX_CONFIG`) overlays the defaults at the top of `gx.ps1`. A complete example is in
 [`gx.example.json`](gx.example.json); `gx config -Create` writes it, `gx config` shows the effective result and reports unknown
 keys and bad patterns, `gx doctor` reports an unreadable file. A broken file is ignored with a warning; it never stops gx.
 
+Configuration is loaded when the script is sourced or the module is imported. After editing the file, run
+`gx config -Reload` to apply it in the current session. `gx config -Create` writes an example, not a snapshot of
+all current settings. Tokens stay in environment variables; `providers.*.tokenVar` stores their names only.
+
+For example, a minimal user config can contain:
+
+```json
+{
+  "originType": "github",
+  "providers": { "github": { "tokenVar": "GITHUB_API_KEY" } },
+  "palette": { "subject": 252, "body": 250 }
+}
+```
+
+`originType` supplies the provider for new remotes and bare clone names. Existing remote hosts are inferred.
+An explicit `gx setup -OriginType github` selects GitHub's configured server; changing an existing GitLab remote
+requires `-Force`. `-Server` overrides the server, including self-hosted installations. Setup stores repository
+URLs and credential helpers in `.git/config`; it does not save command flags to the user config. There is no
+automatic per-repository `.gx.json` overlay; use `$env:GX_CONFIG` to select another user config file.
+
 | Key                                       | Meaning                                                                                                                        |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `user`, `namespace`, `branch`, `logCount` | your account, default namespace for bare repo names, initial/default branch, log length                                        |
+| `originType`                              | `gitlab` (default), `github`, `gitea`, or `custom`; default for new remotes and bare clone names                               |
+| `tokenHelperShell`                        | `PowerShell` (default, requires `pwsh` on PATH) or `Sh`; re-run `gx setup` to refresh existing helpers                         |
 | `providers`                               | `gitlab`/`github`/`gitea` -> `server`, `tokenVar` (the built-in providers only)                                                |
 | `hosts`                                   | map a self-hosted host to a provider, e.g. `"git.corp.example": "gitlab"` (used for token variable, error hints and `gx open`) |
 | `identity`, `identities`                  | `name`/`email` written to a repo's _local_ config on setup/clone/init **only if it has none**; `identities` is per host        |
@@ -983,7 +1067,12 @@ keys and bad patterns, `gx doctor` reports an unreadable file. A broken file is 
 | `traceLog`                                | file that `-CommandTrace` appends to (same as `$env:GX_TRACE_LOG`)                                                             |
 | `gitignore`                               | `default` templates for `gx init`, and your own `templates`                                                                    |
 | `recommended`                             | the global git settings `gx doctor -Fix` applies (only where unset)                                                            |
-| `palette`                                 | 256-colour codes: `label ok warn err dim mode hash ...`                                                                        |
+| `palette`                                 | 256-colour codes: `label ok warn err dim mode hash subject body modified untracked author date ...`                            |
+
+The file-status and log accents can be overridden independently: `palette.modified` defaults to `216`
+(pastel orange), `palette.untracked` to `151` (soft green), `palette.author` to `117` (soft cyan), and
+`palette.date` to `109` (muted teal). `NO_COLOR` and redirected output remain plain; result objects and JSON
+never include display colours.
 
 Built-in `.gitignore` templates: `secrets os editor powershell node python dotnet hugo jekyll eleventy php rust go`
 (`gx ignore -List`). Blocks are marked `# gx:<name>` so re-applying adds nothing twice.
